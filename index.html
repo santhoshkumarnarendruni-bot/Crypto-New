@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v5.2</title>
+<title>Crypto Decision Engine v5.3</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -124,7 +124,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v5.2</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v5.3</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -1234,7 +1234,7 @@ function switchTab(name){
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RENDER — v5.2 mobile-first, everything key on first screen
+// RENDER — v5.3 mobile-first, everything key on first screen
 // ═══════════════════════════════════════════════════════════════
 function renderResult(r, price, target, p5, p10, p15, product, secondTicker, exchPress){
   const vol=r.vol;
@@ -1242,18 +1242,8 @@ function renderResult(r, price, target, p5, p10, p15, product, secondTicker, exc
   const candleText=r.latestGreen?"Green ▲":r.latestRed?"Red ▼":"Flat";
   const cardCls=r.cls==="yes"?"yes-card":r.cls==="no"?"no-card":"";
 
-  // ── High-priority alert banners (decision card) ──────────────
-  let alertsHTML="";
-  if(liveState.lagScore>=3)
-    alertsHTML+=`<div class="alert-strip ${liveState.leader.includes("UP")?"yes":"no"}">⚡ LAG ${liveState.lagScore}/3 — ${liveState.leader}</div>`;
-  if(r.velSig.type!=="sync")
-    alertsHTML+=`<div class="alert-strip ${r.velSig.cls}">📊 ${r.velSig.signal}</div>`;
-  if(r.diverg.earlyEntry)
-    alertsHTML+=`<div class="alert-strip ${r.diverg.cls}">🎯 ${r.diverg.signal}</div>`;
-  if(r.momentum.signal==="BULLISH ACCELERATION"||r.momentum.signal==="BEARISH ACCELERATION")
-    alertsHTML+=`<div class="alert-strip ${r.momentum.cls}">📈 ${r.momentum.signal}: ${r.momentum.detail}</div>`;
-  if(r.override.signal!=="NO SPECIAL VWAP OVERRIDE")
-    alertsHTML+=`<div class="alert-strip ${r.override.cls}">⚠ ${r.override.signal}</div>`;
+  // No alert banners in decision card (moved to Signals tab)
+  const alertsHTML="";
 
   // ── Micro inline alert (show when score >= 5) ────────────────
   const showMicroAlert = r.microScore>=5 && r.mispricingSide!=="NONE";
@@ -1302,7 +1292,6 @@ function renderResult(r, price, target, p5, p10, p15, product, secondTicker, exc
   <div style="margin-top:4px;font-size:13px;">
     ⏱ <b id="timeV">${r.timeLeft.toFixed(1)}</b> min left &nbsp;·&nbsp; <span id="timingV" class="warn">${r.timing}</span>
   </div>
-  <div id="alertsDiv">${alertsHTML}</div>
   <div class="signalAge" id="ageV" style="font-size:10px;color:var(--muted);margin-top:4px;">Updated: ${new Date().toLocaleTimeString()}</div>
 </div>
 
@@ -1530,7 +1519,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v5.2 · tick engine · OB · trade flow · Kalshi velocity · futures premium · BTC corr · decay-VWAP
+    v5.3 · tick engine · OB · trade flow · Kalshi velocity · futures premium · BTC corr · decay-VWAP
   </div>
 </div>
 `;}
