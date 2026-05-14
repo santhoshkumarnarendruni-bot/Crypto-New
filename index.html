@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v5.5</title>
+<title>Crypto Decision Engine v5.8</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -58,7 +58,6 @@ button:active{opacity:.8;}
 .alert-strip.info{background:#1a1600;border:1px solid var(--info);color:var(--info);}
 
 /* ── Quick stats grid ── */
-.quick-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;}
 .q-box{background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;}
 .q-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;}
 .q-val{font-size:15px;font-weight:700;margin-top:1px;}
@@ -119,7 +118,43 @@ th{color:var(--info);font-size:11px;}
 .tick-row{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px;}
 .tick-chip{background:var(--card);border:1px solid var(--border);border-radius:5px;padding:3px 7px;font-size:11px;font-weight:600;}
 
-/* ── Log Tab ── */
+/* ── Combined Proj + Early Entry box ── */
+.combo-box{background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:9px 11px;margin-top:8px;}
+.combo-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:7px;padding-bottom:7px;border-bottom:1px solid var(--border);}
+.combo-proj{min-width:0;}
+.combo-proj-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;}
+.combo-proj-val{font-size:18px;font-weight:800;color:var(--info);line-height:1.1;margin-top:1px;}
+.combo-proj-sub{font-size:10px;margin-top:2px;}
+.combo-ec-header{text-align:right;white-space:nowrap;}
+.combo-ec-count{font-size:15px;font-weight:800;line-height:1;}
+.combo-ec-label{font-size:10px;color:var(--muted);}
+
+/* 6 conditions in 2 columns of 3 rows, ultra-compact */
+.ec-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px;}
+.ec-row{display:flex;align-items:center;gap:5px;padding:3px 0;}
+.ec-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.ec-dot.yes{background:var(--yes);}
+.ec-dot.no{background:var(--no);}
+.ec-dot.skip{background:#2b3643;}
+.ec-dot.warn{background:var(--warn);}
+.ec-text{font-size:11px;line-height:1.2;min-width:0;}
+.ec-label{font-weight:700;font-size:10px;color:var(--muted);}
+.ec-val{font-size:10px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px;}
+
+/* Two smaller stat boxes below (RSI + Early Bias) */
+.stat2-row{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:6px;}
+.stat2-box{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:5px 8px;}
+.stat2-label{font-size:10px;color:var(--muted);text-transform:uppercase;}
+.stat2-val{font-size:13px;font-weight:700;margin-top:1px;}
+.stat2-sub{font-size:10px;color:var(--muted);margin-top:1px;}
+
+/* Early entry fire banner (above the combo box) */
+.early-signal{border-radius:9px;padding:10px 12px;margin-top:8px;font-size:13px;line-height:1.6;display:none;}
+.early-signal.show{display:block;}
+.early-signal.fire{background:#021a08;border:2px solid var(--yes);}
+.early-signal.warn{background:#1a1000;border:2px solid var(--warn);}
+.early-signal.no-fire{background:#1a0303;border:2px solid var(--no);}
+.early-signal-title{font-size:16px;font-weight:800;letter-spacing:.3px;}
 .log-toolbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:center;}
 .log-toolbar button{width:auto;padding:6px 12px;font-size:12px;margin-top:0;}
 .log-toolbar .btn-danger{background:#7a1a1a;}
@@ -172,7 +207,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v5.5</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v5.8</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -1693,12 +1728,16 @@ function logClearAll() {
 // Build one log row from analyzeV5 result
 function buildLogRow(r, price, target, product) {
   const now = Date.now();
-  // 15-min boundary this row belongs to
   const boundary = Math.floor(now / (15*60*1000)) * (15*60*1000);
+
+  // Compute early entry conditions at log time
+  const ec = calcEarlyEntry(r);
+  const cond = ec.conditions;  // [lag, htf, price, cushion, momentum, divergence]
+
   return {
     id:          now + "_" + Math.random().toString(36).slice(2,6),
     ts:          now,
-    boundary,                        // settlement boundary timestamp
+    boundary,
     date:        new Date(now).toLocaleDateString(),
     time:        new Date(now).toLocaleTimeString(),
     coin:        product,
@@ -1727,9 +1766,23 @@ function buildLogRow(r, price, target, product) {
     futPrem:     +(r.futuresPrem.premium||0).toFixed(4),
     volHigh:     r.volatilityHigh ? 1 : 0,
     targetMagnet:r.targetMagnet ? 1 : 0,
-    outcome:     "PENDING",          // filled in by settlement checker
+    // ── Early Entry fields (new) ──────────────────────────────
+    earlyInWindow:   ec.inWindow ? 1 : 0,         // 1 = in 7-12min window
+    earlyPassCount:  ec.passCount,                 // 0-6 conditions passed
+    earlyAlertLevel: ec.alertLevel,                // none / no-fire / warn / fire
+    earlySide:       ec.inWindow ? ec.side : "",   // YES or NO
+    earlyRoiNow:     +ec.roiNow.toFixed(1),        // ROI % if bought at this moment
+    earlyRoiLost:    +ec.roiLost.toFixed(1),       // ROI % lost by waiting to 3-4min
+    earlyC1Lag:      cond[0].ok ? 1 : 0,           // lag score 2-3
+    earlyC2HTF:      cond[1].ok ? 1 : 0,           // HTF aligned
+    earlyC3Price:    cond[2].ok ? 1 : 0,           // Kalshi price < 45¢
+    earlyC4Cushion:  cond[3].ok ? 1 : 0,           // cushion $40-$100
+    earlyC5Momentum: cond[4].ok ? 1 : 0,           // no reversal surge
+    earlyC6Diverge:  cond[5].ok ? 1 : 0,           // divergence widening
+    // ─────────────────────────────────────────────────────────
+    outcome:         "PENDING",
     settlementPrice: null,
-    priceDiffAtLog: +(price - target).toFixed(4)
+    priceDiffAtLog:  +(price - target).toFixed(4)
   };
 }
 
@@ -1821,12 +1874,23 @@ function exportCSV() {
 function renderLogTab() {
   const el = $("logTabContent");
   if(!el) return;
-  const rows = logGetAll().slice().reverse(); // newest first
+  const rows = logGetAll().slice().reverse();
   const st   = logStats(rows);
   const storageBytes = (localStorage.getItem(LOG_KEY)||"").length;
   const storageKB    = (storageBytes / 1024).toFixed(1);
 
-  // Stats row
+  // Early entry stats
+  const earlyFireRows  = rows.filter(r => r.earlyAlertLevel === "fire");
+  const earlyWarnRows  = rows.filter(r => r.earlyAlertLevel === "warn");
+  const earlyFireWins  = earlyFireRows.filter(r => r.outcome === "WIN").length;
+  const earlyFireLoss  = earlyFireRows.filter(r => r.outcome === "LOSS").length;
+  const earlyFireRate  = (earlyFireWins + earlyFireLoss) > 0
+    ? ((earlyFireWins / (earlyFireWins + earlyFireLoss)) * 100).toFixed(0) + "%" : "—";
+  const avgRoiNow  = earlyFireRows.length
+    ? (earlyFireRows.reduce((s,r) => s + (r.earlyRoiNow||0), 0) / earlyFireRows.length).toFixed(0) : "—";
+  const avgRoiLost = earlyFireRows.length
+    ? (earlyFireRows.reduce((s,r) => s + (r.earlyRoiLost||0), 0) / earlyFireRows.length).toFixed(0) : "—";
+
   const statsHTML = `
     <div class="log-stats">
       <div class="log-stat"><div class="log-stat-val info">${st.total}</div><div class="log-stat-label">Total rows</div></div>
@@ -1834,44 +1898,61 @@ function renderLogTab() {
       <div class="log-stat"><div class="log-stat-val ${st.wins>0?"yes":"skip"}">${st.wins}W / ${st.losses}L</div><div class="log-stat-label">Win / Loss</div></div>
       <div class="log-stat"><div class="log-stat-val ${parseFloat(st.winRate)>=60?"yes":parseFloat(st.winRate)>=50?"warn":"no"}">${st.winRate}${st.winRate!=="—"?"%":""}</div><div class="log-stat-label">Win rate</div></div>
     </div>
-    <div class="small" style="margin-bottom:8px;color:var(--muted);">Storage: ${storageKB} KB · ${st.pending} pending settlement · Auto-purge after 48h</div>`;
+    <div class="log-stats" style="margin-top:5px;">
+      <div class="log-stat"><div class="log-stat-val yes">${earlyFireRows.length}</div><div class="log-stat-label">⚡ Fire signals</div></div>
+      <div class="log-stat"><div class="log-stat-val warn">${earlyWarnRows.length}</div><div class="log-stat-label">👀 Watch signals</div></div>
+      <div class="log-stat"><div class="log-stat-val ${parseFloat(earlyFireRate)>=60?"yes":earlyFireRate==="—"?"skip":"warn"}">${earlyFireRate}</div><div class="log-stat-label">Early win rate</div></div>
+      <div class="log-stat"><div class="log-stat-val info">${avgRoiNow==="—"?"—":avgRoiNow+"%"}</div><div class="log-stat-label">Avg ROI at fire</div></div>
+    </div>
+    <div class="small" style="margin-bottom:8px;color:var(--muted);">Storage: ${storageKB} KB · ${st.pending} pending · Auto-purge 48h · Avg ROI lost by waiting: ${avgRoiLost==="—"?"—":avgRoiLost+"%"}</div>`;
 
-  // Table rows (max 200 shown for performance)
   const displayRows = rows.slice(0, 200);
   const tableHTML = displayRows.length ? `
     <div class="log-table-wrap">
       <table class="log-table">
         <thead><tr>
-          <th>Time</th><th>Coin</th><th>Decision</th><th>Conf%</th>
-          <th>Price</th><th>Target</th><th>T-Left</th>
+          <th>Time</th><th>Coin</th><th>Decision</th><th>Conf</th>
+          <th>T-Left</th><th>PriceDiff</th>
           <th>MktYES</th><th>FairYES</th><th>Edge</th>
-          <th>Micro</th><th>Lag</th><th>RSI</th><th>EMA</th>
-          <th>Flow</th><th>Momentum</th>
-          <th>Settle$</th><th>Outcome</th>
+          <th>Micro</th><th>Lag</th><th>HTF</th><th>Momentum</th>
+          <th>⚡Signal</th><th>Pass</th>
+          <th>C1Lag</th><th>C2HTF</th><th>C3Price</th><th>C4Cush</th><th>C5Mom</th><th>C6Div</th>
+          <th>ROI%</th><th>ROIlost</th>
+          <th>Settle</th><th>Outcome</th>
         </tr></thead>
         <tbody>
-          ${displayRows.map(r => {
-            const outCls = r.outcome==="WIN"?"outcome-win":r.outcome==="LOSS"?"outcome-loss":r.outcome==="SKIP"?"outcome-skip":"outcome-pending";
-            const decCls = r.decision==="BET YES"?"yes":r.decision==="BET NO"?"no":r.decision==="WATCH ONLY"?"warn":"skip";
+          ${displayRows.map(row => {
+            const outCls = row.outcome==="WIN"?"outcome-win":row.outcome==="LOSS"?"outcome-loss":row.outcome==="SKIP"?"outcome-skip":"outcome-pending";
+            const decCls = row.decision==="BET YES"?"yes":row.decision==="BET NO"?"no":row.decision==="WATCH ONLY"?"warn":"skip";
+            const alertCls = row.earlyAlertLevel==="fire"?"yes":row.earlyAlertLevel==="warn"?"warn":row.earlyAlertLevel==="no-fire"?"no":"skip";
+            const alertTxt = row.earlyAlertLevel==="fire"?"⚡ FIRE":row.earlyAlertLevel==="warn"?"👀 WATCH":row.earlyAlertLevel==="no-fire"?"⏳ BIAS":row.earlyInWindow?"in win":"—";
+            const dot = v => v===1?'<span class="yes">✓</span>':'<span style="color:var(--border2)">·</span>';
             return `<tr>
-              <td>${r.time}</td>
-              <td>${r.coin.replace("-USD","")}</td>
-              <td class="${decCls}">${r.decision}</td>
-              <td class="${r.confidence>=70?"yes":r.confidence>=55?"warn":"no"}">${r.confidence}%</td>
-              <td>${r.price}</td>
-              <td>${r.target}</td>
-              <td class="${r.timeLeft<=6&&r.timeLeft>=3?"yes":r.timeLeft<3?"warn":"skip"}">${r.timeLeft}m</td>
-              <td>${r.mktYes}¢</td>
-              <td class="${r.edgeYes>6?"yes":r.edgeNo>6?"no":"skip"}">${r.fairYes}¢</td>
-              <td class="${Math.abs(r.edgeYes)>6||Math.abs(r.edgeNo)>6?"warn":"skip"}">${r.edgeYes>0?"+":""}${r.edgeYes}</td>
-              <td class="${r.microScore>=9?"yes":r.microScore>=5?"warn":"skip"}">${r.microScore}/14</td>
-              <td class="${r.lagScore>=3?"warn":r.lagScore>=1?"info":"skip"}">${r.lagScore}/3</td>
-              <td class="${r.rsi>52&&r.rsi<68?"yes":r.rsi<48&&r.rsi>32?"no":"skip"}">${r.rsi}</td>
-              <td class="${r.emaBias==="BULL"?"yes":"no"}">${r.emaBias}</td>
-              <td class="${r.flowSig.includes("BUY")?"yes":r.flowSig.includes("SELL")?"no":"skip"}">${r.flowSig.replace(" FLOW","").replace(" PRESSURE","")}</td>
-              <td class="${r.momentum.includes("BULL")?"yes":r.momentum.includes("BEAR")?"no":"skip"}">${r.momentum==="NONE"?"—":r.momentum.replace(" ACCELERATION","").replace("BULLISH","BULL").replace("BEARISH","BEAR")}</td>
-              <td>${r.settlementPrice||"—"}</td>
-              <td class="${outCls}">${r.outcome}</td>
+              <td>${row.time}</td>
+              <td>${row.coin.replace("-USD","")}</td>
+              <td class="${decCls}">${row.decision.replace("BET ","").replace("WATCH ONLY","WATCH").replace("SKIP","SKIP")}</td>
+              <td class="${row.confidence>=70?"yes":row.confidence>=55?"warn":"no"}">${row.confidence}%</td>
+              <td class="${row.timeLeft>=7&&row.timeLeft<=12?"yes":row.timeLeft<=6&&row.timeLeft>=3?"warn":"skip"}">${row.timeLeft}m</td>
+              <td class="${(row.priceDiffAtLog||0)>0?"yes":"no"}">${(row.priceDiffAtLog||0)>=0?"+":""}${row.priceDiffAtLog||0}</td>
+              <td>${row.mktYes}¢</td>
+              <td class="${(row.edgeYes||0)>6?"yes":(row.edgeNo||0)>6?"no":"skip"}">${row.fairYes}¢</td>
+              <td class="${Math.abs(row.edgeYes||0)>6||Math.abs(row.edgeNo||0)>6?"warn":"skip"}">${(row.edgeYes||0)>0?"+":""}${row.edgeYes||0}</td>
+              <td class="${(row.microScore||0)>=9?"yes":(row.microScore||0)>=5?"warn":"skip"}">${row.microScore||0}/14</td>
+              <td class="${(row.lagScore||0)>=3?"warn":(row.lagScore||0)>=1?"info":"skip"}">${row.lagScore||0}/3</td>
+              <td class="${(row.htfScore||0)>=1?"yes":(row.htfScore||0)<=-1?"no":"skip"}">${row.htfScore||0}</td>
+              <td class="${(row.momentum||"").includes("BULL")?"yes":(row.momentum||"").includes("BEAR")?"no":"skip"}">${(row.momentum||"NONE")==="NONE"?"—":(row.momentum||"").replace(" ACCELERATION","").replace("BULLISH","BULL").replace("BEARISH","BEAR")}</td>
+              <td class="${alertCls}" style="font-weight:700;">${alertTxt}</td>
+              <td class="${(row.earlyPassCount||0)===6?"yes":(row.earlyPassCount||0)>=4?"warn":"skip"}">${row.earlyPassCount||0}/6</td>
+              <td>${dot(row.earlyC1Lag)}</td>
+              <td>${dot(row.earlyC2HTF)}</td>
+              <td>${dot(row.earlyC3Price)}</td>
+              <td>${dot(row.earlyC4Cushion)}</td>
+              <td>${dot(row.earlyC5Momentum)}</td>
+              <td>${dot(row.earlyC6Diverge)}</td>
+              <td class="${(row.earlyRoiNow||0)>80?"yes":(row.earlyRoiNow||0)>30?"warn":"skip"}">${row.earlyRoiNow||0}%</td>
+              <td class="${(row.earlyRoiLost||0)>50?"no":(row.earlyRoiLost||0)>20?"warn":"skip"}">${row.earlyRoiLost||0}%</td>
+              <td>${row.settlementPrice||"—"}</td>
+              <td class="${outCls}">${row.outcome}</td>
             </tr>`;
           }).join("")}
         </tbody>
@@ -1883,11 +1964,103 @@ function renderLogTab() {
   el.innerHTML = statsHTML + tableHTML;
 }
 
+
 let settlementTimer = null;
 function startSettlementChecker() {
   if(settlementTimer) clearInterval(settlementTimer);
   checkSettlements();
   settlementTimer = setInterval(checkSettlements, 60000);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// EARLY ENTRY 6-CONDITION CHECKER  (window: 7–12 min)
+// ═══════════════════════════════════════════════════════════════
+function calcEarlyEntry(r) {
+  // Determine which side the signals lean toward
+  const side = r.yes >= 0.5 ? "YES" : "NO";
+  const mktSidePrice = side === "YES" ? r.mktYes : r.mktNo;   // 0-1
+  const absCushion   = Math.abs(r.avgCushion);                 // $ diff from target
+  const priceDiff    = r.proj - r.target;                      // + = above target
+
+  // ── Condition 1: Lag score 2 or 3 ─────────────────────────
+  const lagOk   = r.lagScore >= 2;
+  const lagCls  = lagOk ? (side==="YES"?"yes":"no") : "skip";
+  const lagTxt  = lagOk
+    ? `Lag ${r.lagScore}/3 — Kalshi behind`
+    : `Lag ${r.lagScore}/3 — Not lagging`;
+
+  // ── Condition 2: HTF score aligns with side ────────────────
+  const htfOk  = side === "YES" ? r.htf.score >= 1 : r.htf.score <= -1;
+  const htfCls = htfOk ? (side==="YES"?"yes":"no") : "skip";
+  const htfTxt = `HTF ${r.htf.score>=0?"+":""}${r.htf.score} — ${htfOk?"Aligned":"Misaligned"}`;
+
+  // ── Condition 3: Kalshi price < 45¢ for chosen side ───────
+  const priceOk  = mktSidePrice < 0.45;
+  const priceCls = priceOk ? (side==="YES"?"yes":"no") : "warn";
+  const priceTxt = priceOk
+    ? `${(mktSidePrice*100).toFixed(0)}¢ — Still cheap`
+    : `${(mktSidePrice*100).toFixed(0)}¢ — Already moved`;
+
+  // ── Condition 4: Cushion $40–$100 ─────────────────────────
+  const cushOk  = absCushion >= 40 && absCushion <= 100;
+  const cushCls = cushOk  ? (side==="YES"?"yes":"no")
+                : absCushion < 40 ? "skip" : "warn";
+  const cushTxt = absCushion < 40
+    ? `$${absCushion.toFixed(0)} — Too thin`
+    : absCushion > 100
+    ? `$${absCushion.toFixed(0)} — Extended spike`
+    : `$${absCushion.toFixed(0)} — Good cushion`;
+
+  // ── Condition 5: No REVERSAL SURGE momentum ───────────────
+  const momOk  = r.momentum.signal !== "REVERSAL SURGE";
+  const momCls = momOk ? (r.momentum.signal==="NONE"?"skip":side==="YES"?"yes":"no") : "no";
+  const momTxt = momOk
+    ? (r.momentum.signal==="NONE" ? "No surge — direction clean" : r.momentum.signal)
+    : "REVERSAL SURGE — skip";
+
+  // ── Condition 6: Divergence widening ──────────────────────
+  const divOk  = r.diverg && (r.diverg.earlyEntry || Math.abs(r.diverg.edge||0) >= 0.06);
+  const divCls = divOk ? (side==="YES"?"yes":"no") : "skip";
+  const divTxt = divOk
+    ? `Edge ${(r.diverg.edge*100).toFixed(1)} pts — widening`
+    : `Edge ${((r.diverg?.edge||0)*100).toFixed(1)} pts — weak`;
+
+  const conditions = [
+    { label:"Lag Score",   ok:lagOk,   cls:lagCls,   txt:lagTxt   },
+    { label:"HTF Bias",    ok:htfOk,   cls:htfCls,   txt:htfTxt   },
+    { label:"Kalshi Price",ok:priceOk, cls:priceCls, txt:priceTxt },
+    { label:"Cushion",     ok:cushOk,  cls:cushCls,  txt:cushTxt  },
+    { label:"Momentum",    ok:momOk,   cls:momCls,   txt:momTxt   },
+    { label:"Divergence",  ok:divOk,   cls:divCls,   txt:divTxt   },
+  ];
+
+  const passCount = conditions.filter(c => c.ok).length;
+  const inWindow  = r.timeLeft >= 7 && r.timeLeft <= 12;
+
+  // ROI at current price vs if it moves to 75¢ before you act
+  const buyFeeNow = Math.min(0.07, 0.03 * mktSidePrice);
+  const sellFeeW  = Math.min(0.07, 0.03 * 1.00);
+  const totalIn   = mktSidePrice + buyFeeNow;
+  const netProfit = (1.00 - sellFeeW) - totalIn;
+  const roiNow    = (netProfit / totalIn) * 100;
+
+  const latePrice = Math.min(0.90, mktSidePrice + 0.35);
+  const buyFeeLate= Math.min(0.07, 0.03 * latePrice);
+  const totalLate = latePrice + buyFeeLate;
+  const netLate   = (1.00 - sellFeeW) - totalLate;
+  const roiLate   = (netLate / totalLate) * 100;
+  const roiLost   = roiNow - roiLate;
+
+  let alertLevel = "none";
+  if(inWindow && passCount === 6)      alertLevel = "fire";
+  else if(inWindow && passCount >= 4)  alertLevel = "warn";
+  else if(inWindow && passCount >= 2)  alertLevel = "no-fire";
+
+  return {
+    conditions, passCount, inWindow, side,
+    mktSidePrice, roiNow, roiLate, roiLost,
+    alertLevel
+  };
 }
 
 let activeTab = "signals";
@@ -1992,29 +2165,75 @@ function renderResult(r, price, target, p5, p10, p15, product, secondTicker, exc
   </div>
 </div>
 
-<!-- ══ QUICK STATS GRID ════════════════════════════════════════ -->
-<div class="quick-grid">
-  <div class="q-box">
-    <div class="q-label">Projected Avg</div>
-    <div class="q-val info" id="projV">${r.proj.toFixed(2)}</div>
-    <div class="q-sub">${r.targetMagnet?'<span class="warn">⚠ Magnet zone</span>':'<span class="yes">✓ Safe dist</span>'}</div>
+<!-- ══ QUICK STATS ══════════════════════════════════════════════ -->
+${(()=>{
+  const ec = calcEarlyEntry(r);
+
+  // Fire banner (only when in window with 2+ conditions)
+  const bannerHTML = ec.alertLevel !== "none" ? `
+  <div class="early-signal show ${ec.alertLevel}">
+    <div class="early-signal-title ${ec.side==="YES"?"yes":"no"}">
+      ${ec.alertLevel==="fire" ? "⚡ EARLY ENTRY: BUY "+ec.side+" NOW" :
+        ec.alertLevel==="warn" ? "👀 EARLY WATCH: "+ec.side+" ("+ec.passCount+"/6)" :
+        "⏳ EARLY BIAS: "+ec.side+" ("+ec.passCount+"/6)"}
+    </div>
+    <div style="font-size:12px;margin-top:3px;">
+      ${ec.side} at <b>${(ec.mktSidePrice*100).toFixed(0)}¢</b> →
+      ROI <b class="${ec.roiNow>50?"yes":ec.roiNow>20?"warn":"no"}">${ec.roiNow.toFixed(0)}%</b>
+      &nbsp;·&nbsp; Wait to 3–4min: ~<b class="no">${ec.roiLate.toFixed(0)}%</b>
+      &nbsp;·&nbsp; <span class="warn">Costs ~${ec.roiLost.toFixed(0)}% ROI</span>
+    </div>
+  </div>` : "";
+
+  // 6 conditions — ultra compact rows
+  const condHTML = ec.conditions.map(c=>`
+    <div class="ec-row">
+      <div class="ec-dot ${c.cls}"></div>
+      <div class="ec-text">
+        <div class="ec-label">${c.label}</div>
+        <div class="ec-val ${c.cls}">${c.txt}</div>
+      </div>
+    </div>`).join("");
+
+  const passColor = ec.passCount===6?"yes":ec.passCount>=4?"warn":"skip";
+  const winLabel  = ec.inWindow
+    ? `<span class="${passColor}" style="font-size:11px;">${ec.passCount}/6 · in window</span>`
+    : `<span class="skip" style="font-size:11px;">${ec.passCount}/6 · outside 7–12m</span>`;
+
+  return `
+${bannerHTML}
+<div class="combo-box">
+  <!-- Top row: Projected Avg left, EC count right -->
+  <div class="combo-top">
+    <div class="combo-proj">
+      <div class="combo-proj-label">Projected Avg</div>
+      <div class="combo-proj-val" id="projV">${r.proj.toFixed(2)}</div>
+      <div class="combo-proj-sub">${r.targetMagnet?'<span class="warn">⚠ Magnet zone</span>':'<span class="yes">✓ Safe distance</span>'}</div>
+    </div>
+    <div class="combo-ec-header">
+      <div class="combo-ec-label">Early Entry</div>
+      <div class="combo-ec-count ${passColor}">${ec.passCount}/6</div>
+      ${winLabel}
+    </div>
   </div>
-  <div class="q-box">
-    <div class="q-label">YES / NO Prob</div>
-    <div class="q-val"><span class="yes" id="toolYesVQ">${(r.yes*100).toFixed(1)}%</span> · <span class="no" id="toolNoVQ">${(r.no*100).toFixed(1)}%</span></div>
-    <div class="q-sub">Kalshi: <span id="kYesVQ">${(r.mktYes*100).toFixed(1)}%</span> YES</div>
+  <!-- 6 conditions grid -->
+  <div class="ec-grid">${condHTML}</div>
+  <!-- RSI + Early Bias as two small boxes below -->
+  <div class="stat2-row">
+    <div class="stat2-box">
+      <div class="stat2-label">RSI · Candle</div>
+      <div class="stat2-val ${r.rsiClass}" id="rsiVQ">${r.rsi.toFixed(0)} <span class="small">${candleText}</span></div>
+      <div class="stat2-sub">${r.ema9>r.ema21?'<span class="yes">EMA Bull</span>':'<span class="no">EMA Bear</span>'} · ${r.volumeSpike?'<span class="yes">Vol⚡</span>':'<span class="skip">Normal</span>'}</div>
+    </div>
+    <div class="stat2-box">
+      <div class="stat2-label">Early Bias · HTF</div>
+      <div class="stat2-val ${r.earlyBiasClass}" id="earlyVQ" style="font-size:11px;">${r.earlyBias.replace("EARLY BIAS: ","").replace("NO EARLY BIAS","Watching")}</div>
+      <div class="stat2-sub" id="htfVQ">${r.htf.suggestion.replace("HTF BIAS: ","").replace("— wait for 15m confirmation","")}</div>
+    </div>
   </div>
-  <div class="q-box">
-    <div class="q-label">RSI · Candle</div>
-    <div class="q-val ${r.rsiClass}" id="rsiVQ">${r.rsi.toFixed(0)} <span class="small">${candleText}</span></div>
-    <div class="q-sub">${r.ema9>r.ema21?'<span class="yes">EMA Bull</span>':'<span class="no">EMA Bear</span>'} · ${r.volumeSpike?'<span class="yes">Vol⚡</span>':'<span class="skip">Vol normal</span>'}</div>
-  </div>
-  <div class="q-box">
-    <div class="q-label">Early Bias</div>
-    <div class="q-val ${r.earlyBiasClass}" id="earlyVQ" style="font-size:12px;">${r.earlyBias.replace("EARLY BIAS: ","").replace("NO EARLY BIAS","Watching")}</div>
-    <div class="q-sub" id="htfVQ">${r.htf.suggestion.replace("HTF BIAS: ","")}</div>
-  </div>
-</div>
+</div>`;
+})()}
+})()}
 
 <!-- ══ MICRO / SCALP / CUSHION INLINE ALERTS ═════════════════ -->
 ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
@@ -2328,7 +2547,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v5.5 · tick engine · OB · trade flow · Kalshi velocity · futures premium · BTC corr · decay-VWAP · return optimizer · Kalshi trading · session logger
+    v5.7 · tick engine · OB · trade flow · Kalshi velocity · futures premium · BTC corr · decay-VWAP · return optimizer · Kalshi trading · session logger · early entry checker + logs
   </div>
 </div>
 `;}
