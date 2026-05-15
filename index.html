@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v5.9</title>
+<title>Crypto Decision Engine v6.0</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -141,6 +141,16 @@ th{color:var(--info);font-size:11px;}
 .ec-label{font-weight:700;font-size:10px;color:var(--muted);}
 .ec-val{font-size:10px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px;}
 
+/* ── 7C Confidence meter ── */
+.conf7-wrap{margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
+.conf7-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px;}
+.conf7-bar-bg{height:10px;border-radius:5px;background:var(--border);overflow:hidden;position:relative;}
+.conf7-bar-fill{height:100%;border-radius:5px;transition:width .4s;}
+.conf7-row{display:flex;justify-content:space-between;align-items:center;margin-top:2px;}
+.conf7-pct{font-size:18px;font-weight:800;line-height:1;}
+.conf7-side{font-size:11px;font-weight:700;margin-left:5px;}
+.conf7-detail{font-size:10px;color:var(--muted);margin-top:2px;}
+
 /* Two smaller stat boxes below (RSI + Early Bias) */
 .stat2-row{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:6px;}
 .stat2-box{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:5px 8px;}
@@ -207,7 +217,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v5.9</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.0</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -1785,8 +1795,11 @@ function buildLogRow(r, price, target, product) {
     earlyC3MktWrong: cond[2].ok ? 1 : 0,          // renamed: was C3Price
     earlyC4Cushion:  cond[3].ok ? 1 : 0,          // new cushion logic
     earlyC5Momentum: cond[4].ok ? 1 : 0,
-    earlyC6Edge:     cond[5].ok ? 1 : 0,          // renamed: was C6Diverge
-    earlyC7NoConsens:cond[6].ok ? 1 : 0,          // NEW condition
+    earlyC6Edge:     cond[5].ok ? 1 : 0,
+    earlyC7NoConsens:cond[6].ok ? 1 : 0,
+    conf7Pct:        ec.conf7Pct,
+    conf7Side:       ec.conf7Side,
+    conf7HardBlock:  ec.hardBlock ? 1 : 0,
     outcome:         "PENDING",
     settlementPrice: null,
     priceDiffAtLog:  +(price - target).toFixed(4)
@@ -2003,113 +2016,168 @@ function startSettlementChecker() {
 // EARLY ENTRY 6-CONDITION CHECKER  (window: 7–12 min)
 // ═══════════════════════════════════════════════════════════════
 function calcEarlyEntry(r) {
-  // Use the ACTUAL decision side (not just fairYes >= 0.5)
+  // ── Side from actual decision ──────────────────────────────
   const decSide = (r.decision === "BET YES" || r.decision === "BET NO")
     ? (r.decision === "BET YES" ? "YES" : "NO")
     : (r.yes >= 0.5 ? "YES" : "NO");
 
-  const mktYesFrac   = r.mktYes   || 0.5;   // fraction 0-1
-  const mktNoFrac    = r.mktNo    || 0.5;
+  const mktYesFrac   = r.mktYes || 0.5;
+  const mktNoFrac    = r.mktNo  || 0.5;
   const mktSidePrice = decSide === "YES" ? mktYesFrac : mktNoFrac;
   const mktOppPrice  = decSide === "YES" ? mktNoFrac  : mktYesFrac;
 
-  // priceDiff: prefer r.price - r.target (exact), fall back to avgCushion (proj-target)
-  // r.price and r.target are now on the analyzeV5 return object
-  const priceDiff = (r.price != null && r.target != null)
+  // priceDiff: real price minus target
+  const priceDiff  = (r.price != null && r.target != null)
     ? (r.price - r.target)
     : (r.avgCushion || 0);
   const absCushion = Math.abs(priceDiff);
 
-  // ── C1: Lag score ≥ 2 — Kalshi is genuinely behind price ──
-  // Data: 100% win rate when lag ≥ 2. Rare but extremely reliable.
-  const c1Ok  = r.lagScore >= 2;
+  // Reference price for % calculations (BTC≈80k, ETH≈3k, SOL≈150, etc.)
+  const refPrice = r.price || r.target || 80000;
+  // Cushion as % of price — coin-agnostic threshold
+  const cushionPct = refPrice > 0 ? (absCushion / refPrice) * 100 : 0;
+  const cushionMinPct = 0.04;   // 0.04% of price = ~$32 for BTC, $0.06 for SOL
+
+  const htf = r.htf ? r.htf.score : 0;
+  const edgeY = r.edgeYes || 0;
+  const edgeN = r.edgeNo  || 0;
+  const edgeSide = decSide === "YES" ? edgeY : edgeN;
+  const isCounterTrend = (decSide==="NO" && priceDiff>0) || (decSide==="YES" && priceDiff<0);
+
+  // ── C1: Lag ≥ 2 ───────────────────────────────────────────
+  const c1Ok  = (r.lagScore || 0) >= 2;
   const c1Cls = c1Ok ? (decSide==="YES"?"yes":"no") : "skip";
-  const c1Txt = c1Ok ? `Lag ${r.lagScore}/3 — Kalshi behind` : `Lag ${r.lagScore}/3 — In sync`;
+  const c1Txt = c1Ok ? `Lag ${r.lagScore}/3 — Kalshi behind` : `Lag ${r.lagScore||0}/3 — In sync`;
 
-  // ── C2: HTF aligns with DECISION side (fixed — was using fairYes side) ──
-  // Data: when HTF matched decision = 74%, when it didn't = 100% (was inverted)
-  // Fix: align HTF check to the actual decision being evaluated
-  const c2Ok  = decSide === "YES" ? r.htf.score >= 1 : r.htf.score <= -1;
-  const c2Cls = c2Ok ? (decSide==="YES"?"yes":"no") : "skip";
-  const c2Txt = `HTF ${r.htf.score>=0?"+":""}${r.htf.score} — ${c2Ok?"Aligned ✓":"Misaligned ✗"}`;
+  // ── C2: HTF aligned with decision side ────────────────────
+  // FIX: HTF ≥ +4 for YES is DANGEROUS (29% win rate), block it
+  const htfAligned = decSide==="YES" ? (htf>=1 && htf<=3) : (htf<=-1);
+  const c2Ok  = htfAligned;
+  const c2Cls = c2Ok ? (decSide==="YES"?"yes":"no") : htf===0?"skip":"warn";
+  const c2Txt = htf>=4 && decSide==="YES"
+    ? `HTF +${htf} — Overextended ✗`
+    : htf<=0 && decSide==="NO" && htf>-1
+    ? `HTF ${htf} — Neutral ✗`
+    : `HTF ${htf>=0?"+":""}${htf} — ${c2Ok?"Aligned ✓":"Misaligned ✗"}`;
 
-  // ── C3: Opposite-side market price > 55¢ — market is still wrong ──
-  // OLD: checked if your side was < 45¢ (cheap). BUG: "cheap" could mean
-  // Kalshi already agrees with you (NO at 20¢ = Kalshi already priced NO in).
-  // NEW: check that the OPPOSITE side is still > 55¢ = market is still
-  // actively pricing the wrong outcome, meaning real edge exists.
-  const c3Ok  = mktOppPrice > 0.55;
-  const c3Cls = c3Ok ? (decSide==="YES"?"yes":"no") : "warn";
-  const c3Txt = c3Ok
-    ? `Opp side ${(mktOppPrice*100).toFixed(0)}¢ — Market mispriced`
-    : `Opp side ${(mktOppPrice*100).toFixed(0)}¢ — Market already agrees`;
+  // ── C3: Market still mispriced — dead zone 8–22¢ blocked ──
+  // opp > 55¢ = ideal; 22-55¢ = partial; 8-22¢ = DEAD ZONE 0% wins; <8¢ = Kalshi agrees
+  const oppCents = mktOppPrice * 100;
+  const inDeadZone = oppCents >= 8 && oppCents <= 22;
+  const c3Ok  = oppCents > 55 || (oppCents > 22 && oppCents <= 55 && !inDeadZone);
+  // Note: < 8¢ means market already fully agrees — no edge, but not the dead zone
+  const c3Cls = c3Ok ? (decSide==="YES"?"yes":"no") : inDeadZone ? "no" : "warn";
+  const c3Txt = inDeadZone
+    ? `Opp ${oppCents.toFixed(0)}¢ — Dead zone (0% wins) ✗`
+    : oppCents > 55
+    ? `Opp ${oppCents.toFixed(0)}¢ — Market mispriced ✓`
+    : oppCents <= 8
+    ? `Opp ${oppCents.toFixed(0)}¢ — Kalshi already agrees`
+    : `Opp ${oppCents.toFixed(0)}¢ — Partial mispricing`;
 
-  // ── C4: Cushion exists (any ≥ $10 in right direction) ──
-  // OLD: $40-$100 range — DATA showed INVERSE relationship (100% win outside range)
-  // NEW: simply require price is moving in the right direction with ≥ $10 buffer.
-  // Counter-trend NO bets (price above target, HTF bearish) are VALID and won 90%.
-  const priceDirectionOk = (decSide==="YES" && priceDiff > 10) ||
-                           (decSide==="NO"  && priceDiff < -10) ||
-                           (decSide==="NO"  && priceDiff > 10 && r.htf.score <= -3);  // counter-trend NO
-  const c4Ok  = priceDirectionOk && absCushion >= 10;
+  // ── C4: Cushion % of price — coin-agnostic ────────────────
+  const priceDirectionOk =
+    (decSide==="YES" && priceDiff > 0) ||
+    (decSide==="NO"  && priceDiff < 0) ||
+    (decSide==="NO"  && priceDiff > 0 && htf <= -3);  // counter-trend NO
+  const c4Ok  = priceDirectionOk && cushionPct >= cushionMinPct;
   const c4Cls = c4Ok ? (decSide==="YES"?"yes":"no") : "skip";
   const c4Txt = c4Ok
-    ? `$${Math.abs(priceDiff).toFixed(0)} ${decSide==="NO"&&priceDiff>0?"counter-trend":"cushion"} ✓`
-    : `$${Math.abs(priceDiff).toFixed(0)} — Weak / wrong dir`;
+    ? `${cushionPct.toFixed(2)}% (${absCushion<10?absCushion.toFixed(2):"$"+absCushion.toFixed(0)}) ${isCounterTrend&&decSide==="NO"?"CTrend":"cushion"} ✓`
+    : !priceDirectionOk
+    ? `Wrong direction ${priceDiff>=0?"+":""}${absCushion<10?absCushion.toFixed(2):"$"+absCushion.toFixed(0)}`
+    : `${cushionPct.toFixed(2)}% — Too thin`;
 
-  // ── C5: No REVERSAL SURGE momentum ────────────────────────
-  // Data: 83% win WITH this, 0% win WITHOUT. Perfect filter. Keep unchanged.
-  const c5Ok  = r.momentum.signal !== "REVERSAL SURGE";
-  const c5Cls = c5Ok ? (r.momentum.signal==="NONE"?"skip":decSide==="YES"?"yes":"no") : "no";
-  const c5Txt = c5Ok
-    ? (r.momentum.signal==="NONE" ? "Clean — no surge" : r.momentum.signal.replace(" ACCELERATION","").replace("BULLISH","BULL").replace("BEARISH","BEAR"))
-    : "REVERSAL SURGE ✗";
+  // ── C5: Momentum — context-aware ──────────────────────────
+  // FIX: REVERSAL SURGE in a CONFIRMED direction (HTF ≤ -4 for NO) is still bearish
+  const mom = r.momentum ? r.momentum.signal : "NONE";
+  const isConfirmedDirectionSurge =
+    mom === "REVERSAL SURGE" && (
+      (decSide==="NO"  && htf <= -4) ||
+      (decSide==="YES" && htf >= 4)
+    );
+  const c5Ok  = mom !== "REVERSAL SURGE" || isConfirmedDirectionSurge;
+  const c5Cls = c5Ok ? (mom==="NONE"?"skip":decSide==="YES"?"yes":"no") : "no";
+  const c5Txt = !c5Ok
+    ? "REVERSAL SURGE ✗"
+    : isConfirmedDirectionSurge
+    ? `Surge (confirmed dir) ✓`
+    : mom==="NONE" ? "Clean — no surge" : mom.replace(" ACCELERATION","").replace("BULLISH","BULL").replace("BEARISH","BEAR");
 
-  // ── C6: Divergence — fair value edge ≥ 10 pts ─────────────
-  // Strengthened from 6 pts to 10 pts based on data (10-20 pt edge = 100% win)
-  const edgeForSide = decSide === "YES" ? (r.edgeYes||0) : (r.edgeNo||0);
-  const c6Ok  = edgeForSide >= 0.10 || (r.diverg && r.diverg.earlyEntry);
+  // ── C6: Edge ≥ 10 pts (strengthened) ──────────────────────
+  const c6Ok  = edgeSide >= 10;
   const c6Cls = c6Ok ? (decSide==="YES"?"yes":"no") : "skip";
   const c6Txt = c6Ok
-    ? `${(edgeForSide*100).toFixed(0)} pts edge — Fair value gap`
-    : `${(edgeForSide*100).toFixed(0)} pts — Edge too small`;
+    ? `${edgeSide.toFixed(0)} pts edge ✓`
+    : `${edgeSide.toFixed(0)} pts — Need 10+`;
 
-  // ── C7: No Kalshi Consensus (NEW) — market hasn't priced it yet ──
-  // The 4:35 PM loss cluster: mktYes was 19-31¢ for a NO bet = Kalshi already
-  // agreed NO was likely. Zero edge left. This is the single biggest fix.
-  // Rule: your side price must be BETWEEN 25¢ and 75¢ (Kalshi still unsure)
-  // OR if counter-trend: opposite side must be > 60¢ (market still confident wrong way)
-  const isCounterTrend = (decSide==="NO" && priceDiff > 0) || (decSide==="YES" && priceDiff < 0);
-  const c7Ok = isCounterTrend
-    ? mktOppPrice > 0.60   // counter-trend: market still pricing opposite strongly
-    : (mktSidePrice >= 0.25 && mktSidePrice <= 0.75);  // normal: Kalshi hasn't decided yet
+  // ── C7: No Kalshi consensus — hard cap ≥ 80¢ ──────────────
+  // FIX: Hard cap at 80¢ (was 75¢). mktYes ≥ 80¢ = near-zero ROI even on wins
+  // Dead zone fix: also catch when side is suspiciously cheap (< 5¢ = already decided)
+  const sideCents = mktSidePrice * 100;
+  const c7Normal  = sideCents >= 25 && sideCents <= 80;   // was 75, now 80
+  const c7Counter = isCounterTrend && oppCents > 60;
+  const c7Ok  = c7Normal || c7Counter;
   const c7Cls = c7Ok ? (decSide==="YES"?"yes":"no") : "no";
-  const c7Txt = c7Ok
-    ? `${(mktSidePrice*100).toFixed(0)}¢ — Kalshi undecided ✓`
-    : mktSidePrice < 0.25
-    ? `${(mktSidePrice*100).toFixed(0)}¢ — Kalshi already agrees (no edge)`
-    : `${(mktSidePrice*100).toFixed(0)}¢ — Kalshi too confident`;
+  const c7Txt = sideCents > 80
+    ? `${sideCents.toFixed(0)}¢ — Hard cap (ROI≈0%) ✗`
+    : sideCents < 25 && !c7Counter
+    ? `${sideCents.toFixed(0)}¢ — Kalshi agrees (no edge) ✗`
+    : `${sideCents.toFixed(0)}¢ — Undecided ✓`;
 
   const conditions = [
-    { label:"C1 Lag",       ok:c1Ok, cls:c1Cls, txt:c1Txt },
-    { label:"C2 HTF",       ok:c2Ok, cls:c2Cls, txt:c2Txt },
-    { label:"C3 Mkt Wrong", ok:c3Ok, cls:c3Cls, txt:c3Txt },
-    { label:"C4 Cushion",   ok:c4Ok, cls:c4Cls, txt:c4Txt },
-    { label:"C5 Momentum",  ok:c5Ok, cls:c5Cls, txt:c5Txt },
-    { label:"C6 Edge",      ok:c6Ok, cls:c6Cls, txt:c6Txt },
-    { label:"C7 No Consens",ok:c7Ok, cls:c7Cls, txt:c7Txt },
+    { label:"C1 Lag",        ok:c1Ok, cls:c1Cls, txt:c1Txt, w:1 },
+    { label:"C2 HTF",        ok:c2Ok, cls:c2Cls, txt:c2Txt, w:2 },
+    { label:"C3 Mkt Wrong",  ok:c3Ok, cls:c3Cls, txt:c3Txt, w:1.5 },
+    { label:"C4 Cushion",    ok:c4Ok, cls:c4Cls, txt:c4Txt, w:1 },
+    { label:"C5 Momentum",   ok:c5Ok, cls:c5Cls, txt:c5Txt, w:2 },
+    { label:"C6 Edge",       ok:c6Ok, cls:c6Cls, txt:c6Txt, w:2.5 },
+    { label:"C7 No Consens", ok:c7Ok, cls:c7Cls, txt:c7Txt, w:2 },
   ];
 
   const passCount = conditions.filter(c => c.ok).length;
   const inWindow  = r.timeLeft >= 7 && r.timeLeft <= 12;
 
-  // ROI calculation at current price
+  // ── Veto conditions — hard blocks regardless of score ─────
+  const hardBlock = !c7Ok || (!c5Ok && !isConfirmedDirectionSurge) || inDeadZone ||
+                    (htf >= 4 && decSide==="YES") || (htf === 0 && decSide==="NO") ||
+                    (sideCents > 80);
+
+  // ── 7C Confidence — independent weighted score ─────────────
+  // Weights derived from data: C6 most predictive (+48pp), C7 (+34pp),
+  // C2 (+23pp), C3 (+31pp), C1 (+31pp), C4/C5 situational
+  // Each condition contributes its weight to max possible score
+  const weights = { c1:1.0, c2:2.0, c3:1.5, c4:1.0, c5:2.0, c6:2.5, c7:2.0 };
+  const maxWeight = Object.values(weights).reduce((a,b)=>a+b, 0);  // 12.0
+  const earned = (c1Ok?weights.c1:0) + (c2Ok?weights.c2:0) + (c3Ok?weights.c3:0) +
+                 (c4Ok?weights.c4:0) + (c5Ok?weights.c5:0) + (c6Ok?weights.c6:0) +
+                 (c7Ok?weights.c7:0);
+  // Hard blocks reduce confidence even if conditions pass
+  const blockPenalty = hardBlock ? 0.35 : 0;
+  const rawConf7 = Math.max(0, earned / maxWeight - blockPenalty);
+  const conf7Pct = Math.round(rawConf7 * 100);
+  // Which side the 7C confidence points to (same as decSide)
+  const conf7Side = decSide;
+  const conf7Cls  = conf7Pct >= 65 ? (conf7Side==="YES"?"yes":"no")
+                  : conf7Pct >= 40 ? "warn" : "skip";
+  const conf7Color = conf7Side==="YES" ? "var(--yes)" : "var(--no)";
+  const conf7Label = conf7Pct >= 65 ? (conf7Side==="YES"?"YES edge":"NO edge")
+                   : conf7Pct >= 40 ? "Weak edge" : "No clear edge";
+
+  // ── Alert level (fire/warn/no-fire/none) ──────────────────
+  let alertLevel = "none";
+  if(!hardBlock && inWindow && passCount >= 6)      alertLevel = "fire";
+  else if(!hardBlock && inWindow && passCount >= 4) alertLevel = "warn";
+  else if(inWindow && passCount >= 2)               alertLevel = "no-fire";
+  // Additional vetos for display
+  if(!c5Ok && !isConfirmedDirectionSurge) alertLevel = "none";
+
+  // ── ROI calculation ────────────────────────────────────────
   const buyFeeNow  = Math.min(0.07, 0.03 * mktSidePrice);
   const sellFeeW   = Math.min(0.07, 0.03 * 1.00);
   const totalIn    = mktSidePrice + buyFeeNow;
   const netProfit  = (1.00 - sellFeeW) - totalIn;
   const roiNow     = totalIn > 0 ? (netProfit / totalIn) * 100 : 0;
-
   const latePrice  = Math.min(0.90, mktSidePrice + 0.35);
   const buyFeeLate = Math.min(0.07, 0.03 * latePrice);
   const totalLate  = latePrice + buyFeeLate;
@@ -2117,23 +2185,16 @@ function calcEarlyEntry(r) {
   const roiLate    = totalLate > 0 ? (netLate / totalLate) * 100 : 0;
   const roiLost    = roiNow - roiLate;
 
-  // Updated thresholds: 7 conditions, fire requires 6+, warn 4+
-  let alertLevel = "none";
-  if(inWindow && passCount >= 6)       alertLevel = "fire";
-  else if(inWindow && passCount >= 4)  alertLevel = "warn";
-  else if(inWindow && passCount >= 2)  alertLevel = "no-fire";
-
-  // C5 veto: REVERSAL SURGE always kills the signal regardless of pass count
-  if(!c5Ok) alertLevel = "none";
-  // C7 veto: if Kalshi already agrees (no edge), kill fire/warn
-  if(!c7Ok && alertLevel === "fire") alertLevel = "warn";
-
   return {
     conditions, passCount, inWindow, side: decSide,
     mktSidePrice, roiNow, roiLate, roiLost,
-    alertLevel, c1Ok, c2Ok, c3Ok, c4Ok, c5Ok, c6Ok, c7Ok
+    alertLevel, hardBlock,
+    c1Ok, c2Ok, c3Ok, c4Ok, c5Ok, c6Ok, c7Ok,
+    conf7Pct, conf7Side, conf7Cls, conf7Color, conf7Label,
+    inDeadZone, isCounterTrend
   };
 }
+
 
 let activeTab = "signals";
 
@@ -2257,7 +2318,7 @@ ${(()=>{
     </div>
   </div>` : "";
 
-  // 6 conditions — ultra compact rows
+  // 7 conditions — ultra compact rows
   const condHTML = ec.conditions.map(c=>`
     <div class="ec-row">
       <div class="ec-dot ${c.cls}"></div>
@@ -2266,6 +2327,33 @@ ${(()=>{
         <div class="ec-val ${c.cls}">${c.txt}</div>
       </div>
     </div>`).join("");
+
+  // 7C Confidence meter
+  const barColor = ec.conf7Pct>=65 ? ec.conf7Color : ec.conf7Pct>=40 ? "var(--warn)" : "var(--skip)";
+  const conf7HTML = `
+    <div class="conf7-wrap">
+      <div class="conf7-label">7-Condition Confidence</div>
+      <div class="conf7-bar-bg">
+        <div class="conf7-bar-fill" style="width:${ec.conf7Pct}%;background:${barColor};"></div>
+      </div>
+      <div class="conf7-row">
+        <div>
+          <span class="conf7-pct ${ec.conf7Cls}">${ec.conf7Pct}%</span>
+          <span class="conf7-side ${ec.conf7Cls}">${ec.conf7Label}</span>
+        </div>
+        <span class="small">${ec.hardBlock?"⛔ Hard block active":ec.inDeadZone?"⚠ Dead zone":ec.passCount+"/7 pass"}</span>
+      </div>
+      <div class="conf7-detail">${
+        ec.hardBlock
+          ? (ec.conf7Side==="YES" && (r.mktYes||0)*100>80 ? "mktYes >80¢ — ROI near zero even if win"
+            : ec.inDeadZone ? "Opp side in 8–22¢ dead zone — historically 0% wins"
+            : (r.htf&&r.htf.score>=4&&ec.conf7Side==="YES") ? "HTF +"+r.htf.score+" — overextended, reversal risk"
+            : "One or more hard-block conditions triggered")
+          : ec.conf7Pct>=65 ? "Strong signal — consider entering in 7–12m window"
+          : ec.conf7Pct>=40 ? "Moderate — wait for more conditions to align"
+          : "Weak — skip or watch only"
+      }</div>
+    </div>`;
 
   const passColor = ec.passCount>=6?"yes":ec.passCount>=4?"warn":"skip";
   const winLabel  = ec.inWindow
@@ -2288,8 +2376,10 @@ ${bannerHTML}
       ${winLabel}
     </div>
   </div>
-  <!-- 6 conditions grid -->
+  <!-- 7 conditions grid -->
   <div class="ec-grid">${condHTML}</div>
+  <!-- 7C Confidence meter -->
+  ${conf7HTML}
   <!-- RSI + Early Bias as two small boxes below -->
   <div class="stat2-row">
     <div class="stat2-box">
@@ -2619,7 +2709,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v5.9 · 7-condition early entry · data-driven C2/C3/C4/C7 · stale target fix · session logger
+    v6.0 · data-driven 7C · conf7 meter · HTF cap · dead zone · hard blocks · coin-agnostic cushion
   </div>
 </div>
 `;}
