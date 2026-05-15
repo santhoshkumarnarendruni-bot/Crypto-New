@@ -1283,6 +1283,7 @@ function analyzeV5({product, price, target, marketInput, candles, restCandles, p
     reasons,warnings,trend5,trend10,trend15,t5pos,t10pos,t15pos,
     ema9,ema21,vwap,vwapPlain,rsi,vol,yesScore,noScore,
     proj,avgCushion,cushionThresh,targetMagnet,
+    price,target,                              // ← added so calcEarlyEntry can use them
     cushionSignal,cushionClass,cushionReason,
     earlyBias,earlyBiasClass,rsiSignal,rsiClass,htf,momentum,
     flow,book,btcCorr,velSig,persLag,futuresPrem:{...futuresPrem},override,
@@ -1729,10 +1730,13 @@ function logClearAll() {
 function buildLogRow(r, price, target, product) {
   const now = Date.now();
   const boundary = Math.floor(now / (15*60*1000)) * (15*60*1000);
-  // Stale target risk: rows logged within 90s of a new boundary may have
-  // the previous window's target (Kalshi publishes new target ~60-90s late)
   const secIntoWindow = (now - boundary) / 1000;
   const staleTargetRisk = secIntoWindow < 90 ? 1 : 0;
+
+  // Ensure price and target are on r before calcEarlyEntry uses them
+  // (analyzeV5 now returns these, but set explicitly here as safety)
+  if(r.price  == null) r.price  = price;
+  if(r.target == null) r.target = target;
 
   const ec   = calcEarlyEntry(r);
   const cond = ec.conditions;
@@ -2000,17 +2004,21 @@ function startSettlementChecker() {
 // ═══════════════════════════════════════════════════════════════
 function calcEarlyEntry(r) {
   // Use the ACTUAL decision side (not just fairYes >= 0.5)
-  // This fixes C2/C4 inversion bug found in data analysis
   const decSide = (r.decision === "BET YES" || r.decision === "BET NO")
     ? (r.decision === "BET YES" ? "YES" : "NO")
     : (r.yes >= 0.5 ? "YES" : "NO");
 
-  const mktYesFrac  = r.mktYes;   // already 0-1
-  const mktNoFrac   = r.mktNo;    // already 0-1
+  const mktYesFrac   = r.mktYes   || 0.5;   // fraction 0-1
+  const mktNoFrac    = r.mktNo    || 0.5;
   const mktSidePrice = decSide === "YES" ? mktYesFrac : mktNoFrac;
-  const mktOppPrice  = decSide === "YES" ? mktNoFrac  : mktYesFrac;  // opposite side
-  const absCushion   = Math.abs(r.avgCushion);
-  const priceDiff    = r.price - r.target;  // raw price diff, not projected
+  const mktOppPrice  = decSide === "YES" ? mktNoFrac  : mktYesFrac;
+
+  // priceDiff: prefer r.price - r.target (exact), fall back to avgCushion (proj-target)
+  // r.price and r.target are now on the analyzeV5 return object
+  const priceDiff = (r.price != null && r.target != null)
+    ? (r.price - r.target)
+    : (r.avgCushion || 0);
+  const absCushion = Math.abs(priceDiff);
 
   // ── C1: Lag score ≥ 2 — Kalshi is genuinely behind price ──
   // Data: 100% win rate when lag ≥ 2. Rare but extremely reliable.
