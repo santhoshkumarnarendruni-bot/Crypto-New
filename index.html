@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v5.8</title>
+<title>Crypto Decision Engine v5.9</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -129,7 +129,7 @@ th{color:var(--info);font-size:11px;}
 .combo-ec-count{font-size:15px;font-weight:800;line-height:1;}
 .combo-ec-label{font-size:10px;color:var(--muted);}
 
-/* 6 conditions in 2 columns of 3 rows, ultra-compact */
+/* 7 conditions in responsive grid */
 .ec-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px;}
 .ec-row{display:flex;align-items:center;gap:5px;padding:3px 0;}
 .ec-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
@@ -207,7 +207,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v5.8</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v5.9</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -1729,10 +1729,13 @@ function logClearAll() {
 function buildLogRow(r, price, target, product) {
   const now = Date.now();
   const boundary = Math.floor(now / (15*60*1000)) * (15*60*1000);
+  // Stale target risk: rows logged within 90s of a new boundary may have
+  // the previous window's target (Kalshi publishes new target ~60-90s late)
+  const secIntoWindow = (now - boundary) / 1000;
+  const staleTargetRisk = secIntoWindow < 90 ? 1 : 0;
 
-  // Compute early entry conditions at log time
-  const ec = calcEarlyEntry(r);
-  const cond = ec.conditions;  // [lag, htf, price, cushion, momentum, divergence]
+  const ec   = calcEarlyEntry(r);
+  const cond = ec.conditions;
 
   return {
     id:          now + "_" + Math.random().toString(36).slice(2,6),
@@ -1766,20 +1769,20 @@ function buildLogRow(r, price, target, product) {
     futPrem:     +(r.futuresPrem.premium||0).toFixed(4),
     volHigh:     r.volatilityHigh ? 1 : 0,
     targetMagnet:r.targetMagnet ? 1 : 0,
-    // ── Early Entry fields (new) ──────────────────────────────
-    earlyInWindow:   ec.inWindow ? 1 : 0,         // 1 = in 7-12min window
-    earlyPassCount:  ec.passCount,                 // 0-6 conditions passed
-    earlyAlertLevel: ec.alertLevel,                // none / no-fire / warn / fire
-    earlySide:       ec.inWindow ? ec.side : "",   // YES or NO
-    earlyRoiNow:     +ec.roiNow.toFixed(1),        // ROI % if bought at this moment
-    earlyRoiLost:    +ec.roiLost.toFixed(1),       // ROI % lost by waiting to 3-4min
-    earlyC1Lag:      cond[0].ok ? 1 : 0,           // lag score 2-3
-    earlyC2HTF:      cond[1].ok ? 1 : 0,           // HTF aligned
-    earlyC3Price:    cond[2].ok ? 1 : 0,           // Kalshi price < 45¢
-    earlyC4Cushion:  cond[3].ok ? 1 : 0,           // cushion $40-$100
-    earlyC5Momentum: cond[4].ok ? 1 : 0,           // no reversal surge
-    earlyC6Diverge:  cond[5].ok ? 1 : 0,           // divergence widening
-    // ─────────────────────────────────────────────────────────
+    staleTargetRisk,                               // NEW: 1 = first 90s of window
+    earlyInWindow:   ec.inWindow ? 1 : 0,
+    earlyPassCount:  ec.passCount,
+    earlyAlertLevel: ec.alertLevel,
+    earlySide:       ec.inWindow ? ec.side : "",
+    earlyRoiNow:     +ec.roiNow.toFixed(1),
+    earlyRoiLost:    +ec.roiLost.toFixed(1),
+    earlyC1Lag:      cond[0].ok ? 1 : 0,
+    earlyC2HTF:      cond[1].ok ? 1 : 0,
+    earlyC3MktWrong: cond[2].ok ? 1 : 0,          // renamed: was C3Price
+    earlyC4Cushion:  cond[3].ok ? 1 : 0,          // new cushion logic
+    earlyC5Momentum: cond[4].ok ? 1 : 0,
+    earlyC6Edge:     cond[5].ok ? 1 : 0,          // renamed: was C6Diverge
+    earlyC7NoConsens:cond[6].ok ? 1 : 0,          // NEW condition
     outcome:         "PENDING",
     settlementPrice: null,
     priceDiffAtLog:  +(price - target).toFixed(4)
@@ -1792,11 +1795,9 @@ async function checkSettlements() {
   let rows = logGetAll();
   let changed = false;
 
-  // Find unique coin+boundary combos that are past due and still PENDING
   const pending = rows.filter(r => r.outcome === "PENDING" && r.boundary < now - 60000);
   if(!pending.length) return;
 
-  // Group by coin+boundary
   const groups = {};
   pending.forEach(r => {
     const key = r.coin + "_" + r.boundary;
@@ -1807,30 +1808,50 @@ async function checkSettlements() {
   for(const key of Object.keys(groups)) {
     const g = groups[key];
     try {
-      // Fetch final price from Coinbase at or just after boundary
       const endISO   = new Date(g.boundary + 60000).toISOString();
       const startISO = new Date(g.boundary - 60000).toISOString();
       const url = `https://api.exchange.coinbase.com/products/${g.coin}/candles?granularity=60&start=${startISO}&end=${endISO}`;
       const candles = await fetchJ(url, 5000);
       if(!candles || !candles.length) continue;
-      // Use the close price of the candle nearest to boundary
-      const sorted = candles.map(c=>({time:+c[0]*1000,close:+c[4]})).sort((a,b)=>Math.abs(a.time-g.boundary)-Math.abs(b.time-g.boundary));
+      const sorted = candles.map(c=>({time:+c[0]*1000,close:+c[4]}))
+                             .sort((a,b)=>Math.abs(a.time-g.boundary)-Math.abs(b.time-g.boundary));
       const settlementPrice = sorted[0].close;
 
-      // Mark each pending row for this coin+boundary
+      // ── Majority target fix ──────────────────────────────────
+      // Rows logged in first 90s of a boundary may have stale (previous window's)
+      // target. Find the majority target for this boundary (most common = correct).
+      const targetCounts = {};
+      g.rows.forEach(r => {
+        const t = String(r.target);
+        targetCounts[t] = (targetCounts[t]||0) + 1;
+      });
+      const majorityTarget = parseFloat(
+        Object.entries(targetCounts).sort((a,b)=>b[1]-a[1])[0][0]
+      );
+
       g.rows.forEach(r => {
         const rowRef = rows.find(x => x.id === r.id);
         if(!rowRef) return;
         rowRef.settlementPrice = +settlementPrice.toFixed(4);
-        const yesWon = settlementPrice > rowRef.target;
-        // Was tool's BET decision correct?
-        if(rowRef.decision === "BET YES")       rowRef.outcome = yesWon  ? "WIN"  : "LOSS";
-        else if(rowRef.decision === "BET NO")   rowRef.outcome = !yesWon ? "WIN"  : "LOSS";
-        else if(rowRef.decision === "WATCH ONLY"||rowRef.decision === "SKIP") rowRef.outcome = "SKIP";
-        else                                    rowRef.outcome = "SKIP";
+
+        // Use majority target for stale rows, own target for fresh rows
+        const useTarget = (rowRef.staleTargetRisk === 1 && rowRef.target !== majorityTarget)
+          ? majorityTarget
+          : rowRef.target;
+
+        const yesWon = settlementPrice > useTarget;
+        if(rowRef.decision === "BET YES")     rowRef.outcome = yesWon  ? "WIN" : "LOSS";
+        else if(rowRef.decision === "BET NO") rowRef.outcome = !yesWon ? "WIN" : "LOSS";
+        else                                  rowRef.outcome = "SKIP";
+
+        // Flag if target was corrected
+        if(rowRef.staleTargetRisk === 1 && rowRef.target !== majorityTarget) {
+          rowRef.targetCorrected = 1;
+          rowRef.correctedTarget = majorityTarget;
+        }
         changed = true;
       });
-    } catch(e) { /* settlement fetch failed, try next cycle */ }
+    } catch(e) {}
   }
 
   if(changed) {
@@ -1916,8 +1937,8 @@ function renderLogTab() {
           <th>MktYES</th><th>FairYES</th><th>Edge</th>
           <th>Micro</th><th>Lag</th><th>HTF</th><th>Momentum</th>
           <th>⚡Signal</th><th>Pass</th>
-          <th>C1Lag</th><th>C2HTF</th><th>C3Price</th><th>C4Cush</th><th>C5Mom</th><th>C6Div</th>
-          <th>ROI%</th><th>ROIlost</th>
+          <th>C1</th><th>C2</th><th>C3</th><th>C4</th><th>C5</th><th>C6</th><th>C7</th>
+          <th>ROI%</th><th>ROIlost</th><th>Stale</th>
           <th>Settle</th><th>Outcome</th>
         </tr></thead>
         <tbody>
@@ -1945,12 +1966,14 @@ function renderLogTab() {
               <td class="${(row.earlyPassCount||0)===6?"yes":(row.earlyPassCount||0)>=4?"warn":"skip"}">${row.earlyPassCount||0}/6</td>
               <td>${dot(row.earlyC1Lag)}</td>
               <td>${dot(row.earlyC2HTF)}</td>
-              <td>${dot(row.earlyC3Price)}</td>
+              <td>${dot(row.earlyC3MktWrong||row.earlyC3Price)}</td>
               <td>${dot(row.earlyC4Cushion)}</td>
               <td>${dot(row.earlyC5Momentum)}</td>
-              <td>${dot(row.earlyC6Diverge)}</td>
+              <td>${dot(row.earlyC6Edge||row.earlyC6Diverge)}</td>
+              <td>${dot(row.earlyC7NoConsens)}</td>
               <td class="${(row.earlyRoiNow||0)>80?"yes":(row.earlyRoiNow||0)>30?"warn":"skip"}">${row.earlyRoiNow||0}%</td>
               <td class="${(row.earlyRoiLost||0)>50?"no":(row.earlyRoiLost||0)>20?"warn":"skip"}">${row.earlyRoiLost||0}%</td>
+              <td class="${row.staleTargetRisk==1?"warn":"skip"}">${row.staleTargetRisk==1?"⚠":"✓"}${row.targetCorrected==1?" fixed":""}</td>
               <td>${row.settlementPrice||"—"}</td>
               <td class="${outCls}">${row.outcome}</td>
             </tr>`;
@@ -1976,90 +1999,131 @@ function startSettlementChecker() {
 // EARLY ENTRY 6-CONDITION CHECKER  (window: 7–12 min)
 // ═══════════════════════════════════════════════════════════════
 function calcEarlyEntry(r) {
-  // Determine which side the signals lean toward
-  const side = r.yes >= 0.5 ? "YES" : "NO";
-  const mktSidePrice = side === "YES" ? r.mktYes : r.mktNo;   // 0-1
-  const absCushion   = Math.abs(r.avgCushion);                 // $ diff from target
-  const priceDiff    = r.proj - r.target;                      // + = above target
+  // Use the ACTUAL decision side (not just fairYes >= 0.5)
+  // This fixes C2/C4 inversion bug found in data analysis
+  const decSide = (r.decision === "BET YES" || r.decision === "BET NO")
+    ? (r.decision === "BET YES" ? "YES" : "NO")
+    : (r.yes >= 0.5 ? "YES" : "NO");
 
-  // ── Condition 1: Lag score 2 or 3 ─────────────────────────
-  const lagOk   = r.lagScore >= 2;
-  const lagCls  = lagOk ? (side==="YES"?"yes":"no") : "skip";
-  const lagTxt  = lagOk
-    ? `Lag ${r.lagScore}/3 — Kalshi behind`
-    : `Lag ${r.lagScore}/3 — Not lagging`;
+  const mktYesFrac  = r.mktYes;   // already 0-1
+  const mktNoFrac   = r.mktNo;    // already 0-1
+  const mktSidePrice = decSide === "YES" ? mktYesFrac : mktNoFrac;
+  const mktOppPrice  = decSide === "YES" ? mktNoFrac  : mktYesFrac;  // opposite side
+  const absCushion   = Math.abs(r.avgCushion);
+  const priceDiff    = r.price - r.target;  // raw price diff, not projected
 
-  // ── Condition 2: HTF score aligns with side ────────────────
-  const htfOk  = side === "YES" ? r.htf.score >= 1 : r.htf.score <= -1;
-  const htfCls = htfOk ? (side==="YES"?"yes":"no") : "skip";
-  const htfTxt = `HTF ${r.htf.score>=0?"+":""}${r.htf.score} — ${htfOk?"Aligned":"Misaligned"}`;
+  // ── C1: Lag score ≥ 2 — Kalshi is genuinely behind price ──
+  // Data: 100% win rate when lag ≥ 2. Rare but extremely reliable.
+  const c1Ok  = r.lagScore >= 2;
+  const c1Cls = c1Ok ? (decSide==="YES"?"yes":"no") : "skip";
+  const c1Txt = c1Ok ? `Lag ${r.lagScore}/3 — Kalshi behind` : `Lag ${r.lagScore}/3 — In sync`;
 
-  // ── Condition 3: Kalshi price < 45¢ for chosen side ───────
-  const priceOk  = mktSidePrice < 0.45;
-  const priceCls = priceOk ? (side==="YES"?"yes":"no") : "warn";
-  const priceTxt = priceOk
-    ? `${(mktSidePrice*100).toFixed(0)}¢ — Still cheap`
-    : `${(mktSidePrice*100).toFixed(0)}¢ — Already moved`;
+  // ── C2: HTF aligns with DECISION side (fixed — was using fairYes side) ──
+  // Data: when HTF matched decision = 74%, when it didn't = 100% (was inverted)
+  // Fix: align HTF check to the actual decision being evaluated
+  const c2Ok  = decSide === "YES" ? r.htf.score >= 1 : r.htf.score <= -1;
+  const c2Cls = c2Ok ? (decSide==="YES"?"yes":"no") : "skip";
+  const c2Txt = `HTF ${r.htf.score>=0?"+":""}${r.htf.score} — ${c2Ok?"Aligned ✓":"Misaligned ✗"}`;
 
-  // ── Condition 4: Cushion $40–$100 ─────────────────────────
-  const cushOk  = absCushion >= 40 && absCushion <= 100;
-  const cushCls = cushOk  ? (side==="YES"?"yes":"no")
-                : absCushion < 40 ? "skip" : "warn";
-  const cushTxt = absCushion < 40
-    ? `$${absCushion.toFixed(0)} — Too thin`
-    : absCushion > 100
-    ? `$${absCushion.toFixed(0)} — Extended spike`
-    : `$${absCushion.toFixed(0)} — Good cushion`;
+  // ── C3: Opposite-side market price > 55¢ — market is still wrong ──
+  // OLD: checked if your side was < 45¢ (cheap). BUG: "cheap" could mean
+  // Kalshi already agrees with you (NO at 20¢ = Kalshi already priced NO in).
+  // NEW: check that the OPPOSITE side is still > 55¢ = market is still
+  // actively pricing the wrong outcome, meaning real edge exists.
+  const c3Ok  = mktOppPrice > 0.55;
+  const c3Cls = c3Ok ? (decSide==="YES"?"yes":"no") : "warn";
+  const c3Txt = c3Ok
+    ? `Opp side ${(mktOppPrice*100).toFixed(0)}¢ — Market mispriced`
+    : `Opp side ${(mktOppPrice*100).toFixed(0)}¢ — Market already agrees`;
 
-  // ── Condition 5: No REVERSAL SURGE momentum ───────────────
-  const momOk  = r.momentum.signal !== "REVERSAL SURGE";
-  const momCls = momOk ? (r.momentum.signal==="NONE"?"skip":side==="YES"?"yes":"no") : "no";
-  const momTxt = momOk
-    ? (r.momentum.signal==="NONE" ? "No surge — direction clean" : r.momentum.signal)
-    : "REVERSAL SURGE — skip";
+  // ── C4: Cushion exists (any ≥ $10 in right direction) ──
+  // OLD: $40-$100 range — DATA showed INVERSE relationship (100% win outside range)
+  // NEW: simply require price is moving in the right direction with ≥ $10 buffer.
+  // Counter-trend NO bets (price above target, HTF bearish) are VALID and won 90%.
+  const priceDirectionOk = (decSide==="YES" && priceDiff > 10) ||
+                           (decSide==="NO"  && priceDiff < -10) ||
+                           (decSide==="NO"  && priceDiff > 10 && r.htf.score <= -3);  // counter-trend NO
+  const c4Ok  = priceDirectionOk && absCushion >= 10;
+  const c4Cls = c4Ok ? (decSide==="YES"?"yes":"no") : "skip";
+  const c4Txt = c4Ok
+    ? `$${Math.abs(priceDiff).toFixed(0)} ${decSide==="NO"&&priceDiff>0?"counter-trend":"cushion"} ✓`
+    : `$${Math.abs(priceDiff).toFixed(0)} — Weak / wrong dir`;
 
-  // ── Condition 6: Divergence widening ──────────────────────
-  const divOk  = r.diverg && (r.diverg.earlyEntry || Math.abs(r.diverg.edge||0) >= 0.06);
-  const divCls = divOk ? (side==="YES"?"yes":"no") : "skip";
-  const divTxt = divOk
-    ? `Edge ${(r.diverg.edge*100).toFixed(1)} pts — widening`
-    : `Edge ${((r.diverg?.edge||0)*100).toFixed(1)} pts — weak`;
+  // ── C5: No REVERSAL SURGE momentum ────────────────────────
+  // Data: 83% win WITH this, 0% win WITHOUT. Perfect filter. Keep unchanged.
+  const c5Ok  = r.momentum.signal !== "REVERSAL SURGE";
+  const c5Cls = c5Ok ? (r.momentum.signal==="NONE"?"skip":decSide==="YES"?"yes":"no") : "no";
+  const c5Txt = c5Ok
+    ? (r.momentum.signal==="NONE" ? "Clean — no surge" : r.momentum.signal.replace(" ACCELERATION","").replace("BULLISH","BULL").replace("BEARISH","BEAR"))
+    : "REVERSAL SURGE ✗";
+
+  // ── C6: Divergence — fair value edge ≥ 10 pts ─────────────
+  // Strengthened from 6 pts to 10 pts based on data (10-20 pt edge = 100% win)
+  const edgeForSide = decSide === "YES" ? (r.edgeYes||0) : (r.edgeNo||0);
+  const c6Ok  = edgeForSide >= 0.10 || (r.diverg && r.diverg.earlyEntry);
+  const c6Cls = c6Ok ? (decSide==="YES"?"yes":"no") : "skip";
+  const c6Txt = c6Ok
+    ? `${(edgeForSide*100).toFixed(0)} pts edge — Fair value gap`
+    : `${(edgeForSide*100).toFixed(0)} pts — Edge too small`;
+
+  // ── C7: No Kalshi Consensus (NEW) — market hasn't priced it yet ──
+  // The 4:35 PM loss cluster: mktYes was 19-31¢ for a NO bet = Kalshi already
+  // agreed NO was likely. Zero edge left. This is the single biggest fix.
+  // Rule: your side price must be BETWEEN 25¢ and 75¢ (Kalshi still unsure)
+  // OR if counter-trend: opposite side must be > 60¢ (market still confident wrong way)
+  const isCounterTrend = (decSide==="NO" && priceDiff > 0) || (decSide==="YES" && priceDiff < 0);
+  const c7Ok = isCounterTrend
+    ? mktOppPrice > 0.60   // counter-trend: market still pricing opposite strongly
+    : (mktSidePrice >= 0.25 && mktSidePrice <= 0.75);  // normal: Kalshi hasn't decided yet
+  const c7Cls = c7Ok ? (decSide==="YES"?"yes":"no") : "no";
+  const c7Txt = c7Ok
+    ? `${(mktSidePrice*100).toFixed(0)}¢ — Kalshi undecided ✓`
+    : mktSidePrice < 0.25
+    ? `${(mktSidePrice*100).toFixed(0)}¢ — Kalshi already agrees (no edge)`
+    : `${(mktSidePrice*100).toFixed(0)}¢ — Kalshi too confident`;
 
   const conditions = [
-    { label:"Lag Score",   ok:lagOk,   cls:lagCls,   txt:lagTxt   },
-    { label:"HTF Bias",    ok:htfOk,   cls:htfCls,   txt:htfTxt   },
-    { label:"Kalshi Price",ok:priceOk, cls:priceCls, txt:priceTxt },
-    { label:"Cushion",     ok:cushOk,  cls:cushCls,  txt:cushTxt  },
-    { label:"Momentum",    ok:momOk,   cls:momCls,   txt:momTxt   },
-    { label:"Divergence",  ok:divOk,   cls:divCls,   txt:divTxt   },
+    { label:"C1 Lag",       ok:c1Ok, cls:c1Cls, txt:c1Txt },
+    { label:"C2 HTF",       ok:c2Ok, cls:c2Cls, txt:c2Txt },
+    { label:"C3 Mkt Wrong", ok:c3Ok, cls:c3Cls, txt:c3Txt },
+    { label:"C4 Cushion",   ok:c4Ok, cls:c4Cls, txt:c4Txt },
+    { label:"C5 Momentum",  ok:c5Ok, cls:c5Cls, txt:c5Txt },
+    { label:"C6 Edge",      ok:c6Ok, cls:c6Cls, txt:c6Txt },
+    { label:"C7 No Consens",ok:c7Ok, cls:c7Cls, txt:c7Txt },
   ];
 
   const passCount = conditions.filter(c => c.ok).length;
   const inWindow  = r.timeLeft >= 7 && r.timeLeft <= 12;
 
-  // ROI at current price vs if it moves to 75¢ before you act
-  const buyFeeNow = Math.min(0.07, 0.03 * mktSidePrice);
-  const sellFeeW  = Math.min(0.07, 0.03 * 1.00);
-  const totalIn   = mktSidePrice + buyFeeNow;
-  const netProfit = (1.00 - sellFeeW) - totalIn;
-  const roiNow    = (netProfit / totalIn) * 100;
+  // ROI calculation at current price
+  const buyFeeNow  = Math.min(0.07, 0.03 * mktSidePrice);
+  const sellFeeW   = Math.min(0.07, 0.03 * 1.00);
+  const totalIn    = mktSidePrice + buyFeeNow;
+  const netProfit  = (1.00 - sellFeeW) - totalIn;
+  const roiNow     = totalIn > 0 ? (netProfit / totalIn) * 100 : 0;
 
-  const latePrice = Math.min(0.90, mktSidePrice + 0.35);
-  const buyFeeLate= Math.min(0.07, 0.03 * latePrice);
-  const totalLate = latePrice + buyFeeLate;
-  const netLate   = (1.00 - sellFeeW) - totalLate;
-  const roiLate   = (netLate / totalLate) * 100;
-  const roiLost   = roiNow - roiLate;
+  const latePrice  = Math.min(0.90, mktSidePrice + 0.35);
+  const buyFeeLate = Math.min(0.07, 0.03 * latePrice);
+  const totalLate  = latePrice + buyFeeLate;
+  const netLate    = (1.00 - sellFeeW) - totalLate;
+  const roiLate    = totalLate > 0 ? (netLate / totalLate) * 100 : 0;
+  const roiLost    = roiNow - roiLate;
 
+  // Updated thresholds: 7 conditions, fire requires 6+, warn 4+
   let alertLevel = "none";
-  if(inWindow && passCount === 6)      alertLevel = "fire";
+  if(inWindow && passCount >= 6)       alertLevel = "fire";
   else if(inWindow && passCount >= 4)  alertLevel = "warn";
   else if(inWindow && passCount >= 2)  alertLevel = "no-fire";
 
+  // C5 veto: REVERSAL SURGE always kills the signal regardless of pass count
+  if(!c5Ok) alertLevel = "none";
+  // C7 veto: if Kalshi already agrees (no edge), kill fire/warn
+  if(!c7Ok && alertLevel === "fire") alertLevel = "warn";
+
   return {
-    conditions, passCount, inWindow, side,
+    conditions, passCount, inWindow, side: decSide,
     mktSidePrice, roiNow, roiLate, roiLost,
-    alertLevel
+    alertLevel, c1Ok, c2Ok, c3Ok, c4Ok, c5Ok, c6Ok, c7Ok
   };
 }
 
@@ -2174,8 +2238,8 @@ ${(()=>{
   <div class="early-signal show ${ec.alertLevel}">
     <div class="early-signal-title ${ec.side==="YES"?"yes":"no"}">
       ${ec.alertLevel==="fire" ? "⚡ EARLY ENTRY: BUY "+ec.side+" NOW" :
-        ec.alertLevel==="warn" ? "👀 EARLY WATCH: "+ec.side+" ("+ec.passCount+"/6)" :
-        "⏳ EARLY BIAS: "+ec.side+" ("+ec.passCount+"/6)"}
+        ec.alertLevel==="warn" ? "👀 EARLY WATCH: "+ec.side+" ("+ec.passCount+"/7)" :
+        "⏳ EARLY BIAS: "+ec.side+" ("+ec.passCount+"/7)"}
     </div>
     <div style="font-size:12px;margin-top:3px;">
       ${ec.side} at <b>${(ec.mktSidePrice*100).toFixed(0)}¢</b> →
@@ -2195,10 +2259,10 @@ ${(()=>{
       </div>
     </div>`).join("");
 
-  const passColor = ec.passCount===6?"yes":ec.passCount>=4?"warn":"skip";
+  const passColor = ec.passCount>=6?"yes":ec.passCount>=4?"warn":"skip";
   const winLabel  = ec.inWindow
-    ? `<span class="${passColor}" style="font-size:11px;">${ec.passCount}/6 · in window</span>`
-    : `<span class="skip" style="font-size:11px;">${ec.passCount}/6 · outside 7–12m</span>`;
+    ? `<span class="${passColor}" style="font-size:11px;">${ec.passCount}/7 · in window</span>`
+    : `<span class="skip" style="font-size:11px;">${ec.passCount}/7 · outside 7–12m</span>`;
 
   return `
 ${bannerHTML}
@@ -2212,7 +2276,7 @@ ${bannerHTML}
     </div>
     <div class="combo-ec-header">
       <div class="combo-ec-label">Early Entry</div>
-      <div class="combo-ec-count ${passColor}">${ec.passCount}/6</div>
+      <div class="combo-ec-count ${passColor}">${ec.passCount}/7</div>
       ${winLabel}
     </div>
   </div>
@@ -2547,7 +2611,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v5.7 · tick engine · OB · trade flow · Kalshi velocity · futures premium · BTC corr · decay-VWAP · return optimizer · Kalshi trading · session logger · early entry checker + logs
+    v5.9 · 7-condition early entry · data-driven C2/C3/C4/C7 · stale target fix · session logger
   </div>
 </div>
 `;}
