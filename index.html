@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v6.1</title>
+<title>Crypto Decision Engine v6.2</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -242,7 +242,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.1</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.2</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -275,8 +275,8 @@ th{color:var(--info);font-size:11px;}
 
 <div id="errorMsg" class="error-txt"></div>
 
-<!-- ── Live status bar (4 chips) ── -->
-<div class="status-bar" id="statusBar">
+<!-- ── Live status bar — hidden, IDs kept for JS updates ── -->
+<div id="statusBar" style="display:none;">
   <div class="sb-item"><div class="sb-label">CB Price</div><div class="sb-val info" id="tbCoinbase">—</div></div>
   <div class="sb-item"><div class="sb-label">Fast/Lag</div><div class="sb-val skip" id="tbSpread">—</div></div>
   <div class="sb-item"><div class="sb-label">Win TWAP</div><div class="sb-val skip" id="tbWinTwap">—</div></div>
@@ -2086,6 +2086,18 @@ function buildLogRow(r, price, target, product) {
     conf7Pct:        ec.conf7Pct,
     conf7Side:       ec.conf7Side,
     conf7HardBlock:  ec.hardBlock ? 1 : 0,
+    // ── TWAP Guard + Exchange values (for future analysis) ───
+    twapWinAvg:      windowTWAP.avg() !== null ? +windowTWAP.avg().toFixed(2) : null,
+    twapGap:         windowTWAP.gapFromTarget(target) !== null ? +windowTWAP.gapFromTarget(target).toFixed(2) : null,
+    twapLocked:      windowTWAP.lockedDirection(target) || "",
+    twapProgress:    +windowTWAP.windowProgress().toFixed(3),
+    twapSamples:     windowTWAP.samples.length,
+    binancePrice:    multiExch.binance !== null ? +multiExch.binance.toFixed(2) : null,
+    binanceDiv:      (multiExch.binance && multiExch.coinbase) ? +(multiExch.binance - multiExch.coinbase).toFixed(2) : null,
+    krakenPrice:     multiExch.kraken  !== null ? +multiExch.kraken.toFixed(2) : null,
+    britiProxy:      multiExch.britiProxy(target) !== null ? +multiExch.britiProxy(target).toFixed(2) : null,
+    britiGap:        multiExch.britiProxy(target) !== null ? +(multiExch.britiProxy(target) - target).toFixed(2) : null,
+    // ─────────────────────────────────────────────────────────
     outcome:         "PENDING",
     settlementPrice: null,
     priceDiffAtLog:  +(price - target).toFixed(4)
@@ -2585,13 +2597,31 @@ ${(()=>{
   let twapWarnHTML = "";
   let twapCls = "neutral";
   if(twd.est !== null && twd.sampleCount >= 5){
-    const absGap = Math.abs(twapGap);
+    const absGap   = Math.abs(twapGap);
+    const timeLeft = r.timeLeft || 0;
+    const vol      = r.vol || 0;
+    const rsi      = r.rsi || 50;
+    const minsLeft = Math.max(0.25, timeLeft);
+
+    // Expected max move = vol * sqrt(mins) * 3 (3-sigma random walk)
+    const expectedMove  = vol * Math.sqrt(minsLeft) * 3;
+    // RSI extreme (<30 or >70) boosts mean-reversion flip chance
+    const rsiBoosted    = rsi > 70 || rsi < 30;
+    const adjustedMove  = expectedMove * (rsiBoosted ? 1.3 : 1.0);
+    const requiredMove  = absGap + 15;
+    const flipPct       = Math.min(99, Math.round((adjustedMove / requiredMove) * 100));
+    const flipLabel     = flipPct >= 80 ? "Likely" : flipPct >= 40 ? "Possible" : flipPct >= 20 ? "Unlikely" : "Very unlikely";
+    const flipCls       = flipPct >= 80 ? "yes"   : flipPct >= 40 ? "warn"     : "no";
+    const movePerMin    = (vol * Math.sqrt(1) * 2).toFixed(0);
+
+    const flipDetail = `<br><span class="small">~$${adjustedMove.toFixed(0)} expected move in ${minsLeft.toFixed(1)} min${rsiBoosted?" (RSI extreme)":""} · ~$${movePerMin}/min · Need $${requiredMove.toFixed(0)} → Flip: <b class="${flipCls}">${flipLabel} (${flipPct}%)</b></span>`;
+
     if(locked==="YES"){
       twapCls="locked-yes";
-      twapWarnHTML=`<div class="twap-warning yes">⚠ Window avg LOCKED YES (+$${twapGap.toFixed(0)}) — NO bet needs price to drop $${(twapGap+15).toFixed(0)}+ to flip</div>`;
+      twapWarnHTML=`<div class="twap-warning yes">⚠ Window avg LOCKED YES (+$${twapGap.toFixed(0)}) — NO needs $${requiredMove.toFixed(0)}+ drop${flipDetail}</div>`;
     } else if(locked==="NO"){
       twapCls="locked-no";
-      twapWarnHTML=`<div class="twap-warning no">⚠ Window avg LOCKED NO (-$${Math.abs(twapGap).toFixed(0)}) — YES bet needs price to rise $${(Math.abs(twapGap)+15).toFixed(0)}+ to flip</div>`;
+      twapWarnHTML=`<div class="twap-warning no">⚠ Window avg LOCKED NO (-$${absGap.toFixed(0)}) — YES needs $${requiredMove.toFixed(0)}+ rise${flipDetail}</div>`;
     } else if(absGap<15 && prog>0.5){
       twapCls="danger";
       twapWarnHTML=`<div class="twap-warning warn">⚡ Window avg $${twapGap.toFixed(1)} from target — too close to call, avoid betting</div>`;
@@ -3053,7 +3083,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v6.1 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
+    v6.2 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
   </div>
 </div>
 `;}
