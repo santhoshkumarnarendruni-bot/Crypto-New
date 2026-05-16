@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v6.2</title>
+<title>Crypto Decision Engine v6.3</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -242,7 +242,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.2</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.3</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -1218,6 +1218,28 @@ const multiExch = {
   isStale(exchange, maxAgeMs = 15000) {
     const key = "last"+exchange.charAt(0).toUpperCase()+exchange.slice(1);
     return !this[key] || (Date.now() - this[key]) > maxAgeMs;
+  },
+
+  // Returns human-readable age string: "2s", "14s", "1m 3s", or "—"
+  age(exchange) {
+    const key = "last"+exchange.charAt(0).toUpperCase()+exchange.slice(1);
+    if(!this[key]) return "—";
+    const ms = Date.now() - this[key];
+    if(ms < 0) return "now";
+    const s = Math.floor(ms / 1000);
+    if(s < 60) return s+"s ago";
+    return Math.floor(s/60)+"m "+(s%60)+"s ago";
+  },
+
+  // CSS class for age: fresh=yes, ok=skip, stale=warn, very stale=no
+  ageCls(exchange, freshMs=5000, staleMs=15000) {
+    const key = "last"+exchange.charAt(0).toUpperCase()+exchange.slice(1);
+    if(!this[key]) return "no";
+    const ms = Date.now() - this[key];
+    if(ms < freshMs)  return "yes";
+    if(ms < staleMs)  return "skip";
+    if(ms < 30000)    return "warn";
+    return "no";
   }
 };
 
@@ -2496,6 +2518,33 @@ function calcEarlyEntry(r) {
 
 let activeTab = "signals";
 
+// Refresh exchange age labels every second (lightweight — no re-render)
+setInterval(() => {
+  const cells = [
+    { id:"cbPV2",   exch:"coinbase",  subIdx:1 },
+    { id:"cbPV2",   exch:"binance",   subIdx:2 },  // Binance cell is sibling
+  ];
+  // Update all exch5-sub age elements by finding them via their parent exch5-cell
+  const strip = document.querySelector(".exch5-strip");
+  if(!strip) return;
+  const exchCells = strip.querySelectorAll(".exch5-cell");
+  const exchKeys  = ["coinbase","binance","kraken","coinbase","binance"];
+  exchCells.forEach((cell, i) => {
+    const ageDivs = cell.querySelectorAll(".exch5-sub");
+    const lastDiv = ageDivs[ageDivs.length - 1];  // always the last sub = age line
+    if(!lastDiv) return;
+    const key = exchKeys[i];
+    if(i === 3) {
+      // BRTI Proxy — show both CB and KR ages
+      lastDiv.textContent = "CB "+multiExch.age("coinbase")+" · KR "+multiExch.age("kraken");
+      lastDiv.className = "exch5-sub " + multiExch.ageCls("coinbase");
+    } else {
+      lastDiv.textContent = multiExch.age(key);
+      lastDiv.className   = "exch5-sub " + multiExch.ageCls(key);
+    }
+  });
+}, 1000);
+
 function switchTab(name){
   activeTab = name;
   document.querySelectorAll(".tab-btn").forEach(b=>b.classList.toggle("active", b.dataset.tab===name));
@@ -2637,26 +2686,31 @@ ${(()=>{
     <div class="exch5-label">Coinbase (settl)</div>
     <div class="exch5-val ${cbColor}" id="cbPV2">${price.toFixed(2)}</div>
     <div class="exch5-sub">${(price-target)>=0?"+":""}${(price-target).toFixed(2)}</div>
+    <div class="exch5-sub ${multiExch.ageCls('coinbase')}">${multiExch.age('coinbase')}</div>
   </div>
   <div class="exch5-cell">
     <div class="exch5-label">Binance (lead)</div>
     <div class="exch5-val ${bn?(bn>target?"yes":"no"):multiExch.isStale("binance",30000)?"warn":"skip"}">${bn?bn.toFixed(2):multiExch.isStale("binance",30000)?"loading...":"—"}</div>
     <div class="exch5-sub">${bnDiv!==null?(bnDiv>=0?"CB+":"CB")+bnDiv.toFixed(1):bn?"stale":"no data"}</div>
+    <div class="exch5-sub ${multiExch.ageCls('binance')}">${multiExch.age('binance')}</div>
   </div>
   <div class="exch5-cell">
     <div class="exch5-label">Kraken (BRTI)</div>
     <div class="exch5-val ${kr?(kr>target?"yes":"no"):"skip"}">${kr?kr.toFixed(2):"—"}</div>
     <div class="exch5-sub">${kr&&target?(kr-target>=0?"+":"")+(kr-target).toFixed(0)+" vs tgt":"—"}</div>
+    <div class="exch5-sub ${multiExch.ageCls('kraken')}">${multiExch.age('kraken')}</div>
   </div>
   <div class="exch5-cell">
     <div class="exch5-label">BRTI Proxy</div>
     <div class="exch5-val ${britiColor}">${brti?brti.toFixed(2):"CB only"}</div>
     <div class="exch5-sub">${britiGap!==null?(britiGap>=0?"+":"")+britiGap.toFixed(1)+" vs tgt":"—"}</div>
+    <div class="exch5-sub ${brti?(multiExch.ageCls('coinbase')):"skip"}">${brti?"CB "+multiExch.age('coinbase')+" · KR "+multiExch.age('kraken'):"—"}</div>
   </div>
   <div class="exch5-cell">
     <div class="exch5-label">Binance Div</div>
     <div class="exch5-val ${bnDiv!==null?(Math.abs(bnDiv)>30?"warn":Math.abs(bnDiv)>10?"info":"skip"):"skip"}">${bnDiv!==null?(bnDiv>=0?"+":"")+bnDiv.toFixed(1):bn?"calc...":"—"}</div>
     <div class="exch5-sub">${bnDiv!==null?(Math.abs(bnDiv)>30?"⚠ big gap":bnDiv>0?"BN leads":"CB leads"):"—"}</div>
+    <div class="exch5-sub ${multiExch.ageCls('binance')}">${multiExch.age('binance')}</div>
   </div>
 </div>
 
@@ -3083,7 +3137,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v6.2 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
+    v6.3 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
   </div>
 </div>
 `;}
