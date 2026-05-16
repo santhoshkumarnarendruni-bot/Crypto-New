@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v6.0</title>
+<title>Crypto Decision Engine v6.1</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -181,7 +181,32 @@ th{color:var(--info);font-size:11px;}
 .outcome-loss{color:var(--no);font-weight:700;}
 .outcome-pending{color:var(--muted);}
 .outcome-skip{color:var(--skip);}
-.roi-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;}
+/* ── Window TWAP Guard ── */
+.twap-guard{border-radius:8px;padding:9px 12px;margin-top:6px;border:1px solid var(--border);background:var(--card2);}
+.twap-guard.locked-yes{border-color:var(--yes);background:#041208;}
+.twap-guard.locked-no{border-color:var(--no);background:#120404;}
+.twap-guard.danger{border-color:var(--no);background:#1a0404;}
+.twap-guard.warn{border-color:var(--warn);background:#120e00;}
+.twap-guard.neutral{border-color:var(--border);}
+.twap-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px;}
+.twap-bar-bg{height:6px;border-radius:3px;background:var(--border);overflow:hidden;margin:4px 0;}
+.twap-bar-fill{height:100%;border-radius:3px;transition:width .4s;}
+.twap-row{display:flex;justify-content:space-between;font-size:12px;margin-top:3px;}
+.twap-warning{font-size:11px;font-weight:700;margin-top:4px;padding:4px 8px;border-radius:5px;}
+.twap-warning.yes{background:#041208;color:var(--yes);}
+.twap-warning.no{background:#120404;color:var(--no);}
+.twap-warning.warn{background:#120e00;color:var(--warn);}
+/* ── Multi-exchange strip ── */
+.exch5-strip{display:flex;gap:0;background:var(--card2);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:6px;}
+.exch5-cell{flex:1;padding:5px 6px;border-right:1px solid var(--border);min-width:0;}
+.exch5-cell:last-child{border-right:none;}
+.exch5-label{font-size:9px;color:var(--muted);white-space:nowrap;}
+.exch5-val{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.exch5-sub{font-size:9px;color:var(--muted);}
+.brti-box{display:flex;justify-content:space-between;align-items:center;background:var(--card);border:1px solid var(--border2);border-radius:6px;padding:5px 10px;margin-top:5px;font-size:12px;}
+.brti-label{color:var(--muted);font-size:10px;}
+.brti-val{font-weight:700;font-size:14px;}
+/* ── Return Optimizer ── */
 .roi-box{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;text-align:center;}
 .roi-box.highlight{border-color:var(--yes);background:#061a0e;}
 .roi-box.highlight.no-side{border-color:var(--no);background:#1a0606;}
@@ -217,7 +242,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.0</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.1</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -254,7 +279,8 @@ th{color:var(--info);font-size:11px;}
 <div class="status-bar" id="statusBar">
   <div class="sb-item"><div class="sb-label">CB Price</div><div class="sb-val info" id="tbCoinbase">—</div></div>
   <div class="sb-item"><div class="sb-label">Fast/Lag</div><div class="sb-val skip" id="tbSpread">—</div></div>
-  <div class="sb-item"><div class="sb-label">Flow/OB</div><div class="sb-val skip" id="tbFlowOB">—</div></div>
+  <div class="sb-item"><div class="sb-label">Win TWAP</div><div class="sb-val skip" id="tbWinTwap">—</div></div>
+  <div class="sb-item"><div class="sb-label">BRTI Proxy</div><div class="sb-val skip" id="tbBrti">—</div></div>
   <div class="sb-item"><div class="sb-label">Kalshi YES</div><div class="sb-val skip" id="tbKalshi">—</div></div>
 </div>
 
@@ -591,14 +617,33 @@ function updateStatusBar(){
     setText("tbSpread", lagTxt);
     setClass("tbSpread","sb-val "+(f.lagScore>=3?"warn":f.lagScore>=1?"info":"skip"));
   }
-  // flow+OB combined
-  const flow=tickStore.flowRatio(30);
-  const book=bookStore.imbalance(0.003);
-  const flowOB = flow.cls!=="skip" ? flow.signal.replace("STRONG ","").replace(" FLOW","").replace(" PRESSURE","") :
-                 book.cls!=="skip" ? book.signal.replace("HEAVY ","").replace(" WALL","").replace(" SIDE HEAVIER","") : "—";
-  const cls2 = flow.cls!=="skip" ? flow.cls : book.cls;
-  setText("tbFlowOB", flowOB);
-  setClass("tbFlowOB","sb-val "+cls2);
+  // Window TWAP chip
+  const tg = $("target") ? +$("target").value : 0;
+  const twapData = windowTWAP.getGuardData(tg);
+  const twapEl = $("tbWinTwap");
+  if(twapEl && twapData.est && tg){
+    const gap = twapData.gap;
+    const locked = twapData.locked;
+    const symbol = gap > 0 ? "▲" : "▼";
+    twapEl.textContent = (gap>=0?"+":"")+gap.toFixed(0)+" "+symbol+" ("+twapData.sampleCount+"s)";
+    twapEl.className = "sb-val "+(locked==="YES"?"yes":locked==="NO"?"no":Math.abs(gap||0)<15?"warn":"skip");
+  } else if(twapEl){
+    twapEl.textContent = twapData.sampleCount>0?twapData.sampleCount+"pts":"—";
+    twapEl.className = "sb-val skip";
+  }
+  // BRTI proxy chip
+  const britiEl = $("tbBrti");
+  if(britiEl){
+    const brti = multiExch.britiProxy(tg);
+    if(brti && tg){
+      const bg = brti - tg;
+      britiEl.textContent = brti.toFixed(0)+" ("+(bg>=0?"+":"")+bg.toFixed(0)+")";
+      britiEl.className = "sb-val "+(bg>15?"yes":bg<-15?"no":"skip");
+    } else if(brti){
+      britiEl.textContent = brti.toFixed(0);
+      britiEl.className = "sb-val info";
+    }
+  }
 }
 
 function startAllSockets(){
@@ -607,6 +652,17 @@ function startAllSockets(){
 
   liveState = { coinbase:null, fastPrice:null, fastSource:"—", leader:"WAITING",
                 lagScore:0, spread:0, spreadPct:0, status:"Connecting...", lastUpdate:0 };
+  // Reset window trackers
+  windowTWAP.boundary = 0;
+  windowTWAP.samples  = [];
+  windowTWAP.krakenPrice = null;
+  windowTWAP.britiProxy  = null;
+  multiExch.coinbase = null;
+  multiExch.binance  = null;
+  multiExch.kraken   = null;
+
+  // Start dedicated Binance price poller (independent of fast WS chain)
+  startBinancePoller(product);
 
   ["cbTickerWs","cbL2Ws","fastWs","krakenWs"].forEach(k=>{
     try{ if(window[k]) window[k].close(); }catch(e){}
@@ -626,6 +682,8 @@ function startAllSockets(){
           liveState.lastUpdate = Date.now();
           const side = d.side==="buy"?"buy":d.side==="sell"?"sell":"unknown";
           tickStore.push(price, side, +d.last_size||0);
+          windowTWAP.push(price);              // ← Window TWAP tracker
+          multiExch.set("coinbase", price);    // ← Multi-exchange tracker
           updateLeader(product);
           updateStatusBar();
           drawMiniChart();
@@ -670,7 +728,12 @@ function startAllSockets(){
     window.fastWs.onmessage = e=>{
       try{
         const d=JSON.parse(e.data);
-        if(d.p){ liveState.fastPrice=+d.p; liveState.fastSource="Binance"; updateLeader(product); }
+        if(d.p){
+          liveState.fastPrice=+d.p;
+          liveState.fastSource="Binance";
+          multiExch.set("binance", +d.p);     // ← Track Binance separately
+          updateLeader(product);
+        }
       }catch(err){}
     };
     window.fastWs.onerror = ()=>{ startKrakenFallback(product); };
@@ -697,7 +760,12 @@ function startKrakenFallback(product){
         const d=JSON.parse(e.data);
         if(d.channel==="ticker" && d.data?.length){
           const p=+(d.data[0].last||d.data[0].bid);
-          if(p>0){ liveState.fastPrice=p; liveState.fastSource="Kraken"; updateLeader(product); }
+          if(p>0){
+            liveState.fastPrice=p;
+            liveState.fastSource="Kraken";
+            multiExch.set("kraken", p);       // ← Track Kraken for BRTI proxy
+            updateLeader(product);
+          }
         }
       }catch(err){}
     };
@@ -934,6 +1002,224 @@ function getTimeLeft(){
   const fifteen=15*60*1000;
   return Math.max(0,(Math.floor(Date.now()/fifteen)*fifteen+fifteen-Date.now())/60000);
 }
+
+// ═══════════════════════════════════════════════════════════════
+// WINDOW TWAP ENGINE
+// ═══════════════════════════════════════════════════════════════
+// Tracks the rolling average price SINCE the current 15-min window opened
+const windowTWAP = {
+  boundary: 0,
+  samples: [],        // [{price, ts}]
+  krakenPrice: null,  // second BRTI component
+  britiProxy: null,   // (CB*0.6 + Kraken*0.4)
+
+  // Call every time a new Coinbase tick arrives
+  push(price) {
+    const now     = Date.now();
+    const fifteen = 15 * 60 * 1000;
+    const bnd     = Math.floor(now / fifteen) * fifteen;
+
+    // Reset on new window
+    if(bnd !== this.boundary) {
+      this.boundary = bnd;
+      this.samples  = [];
+    }
+    this.samples.push({ price, ts: now });
+    // Cap memory at 1 sample every 5s (max 180 per window)
+    if(this.samples.length > 200) this.samples.shift();
+    this._updateBRTI(price);
+  },
+
+  _updateBRTI(cbPrice) {
+    if(this.krakenPrice && cbPrice) {
+      this.britiProxy = cbPrice * 0.60 + this.krakenPrice * 0.40;
+    } else {
+      this.britiProxy = cbPrice;
+    }
+  },
+
+  updateKraken(price) {
+    this.krakenPrice = price;
+    if(this.samples.length > 0) {
+      this._updateBRTI(this.samples[this.samples.length-1].price);
+    }
+  },
+
+  avg() {
+    if(!this.samples.length) return null;
+    return this.samples.reduce((s,p) => s + p.price, 0) / this.samples.length;
+  },
+
+  // Weighted avg (recent = more weight, mimics TWAP settlement)
+  weightedAvg() {
+    if(!this.samples.length) return null;
+    const n = this.samples.length;
+    let pv = 0, w = 0;
+    this.samples.forEach((s, i) => {
+      const wt = (i + 1);           // linearly increasing weight
+      pv += s.price * wt;
+      w  += wt;
+    });
+    return pv / w;
+  },
+
+  // How much time has elapsed in this window (0-1)
+  windowProgress() {
+    const now     = Date.now();
+    const fifteen = 15 * 60 * 1000;
+    return Math.min(1, (now - this.boundary) / fifteen);
+  },
+
+  // Current estimated settlement (weighted avg with progress-based confidence)
+  settlementEstimate() {
+    const wa = this.weightedAvg();
+    if(!wa) return null;
+    // As window progresses, the weighted avg converges toward true settlement
+    return wa;
+  },
+
+  // Gap between window avg and target
+  gapFromTarget(target) {
+    const est = this.settlementEstimate();
+    if(!est || !target) return null;
+    return est - target;
+  },
+
+  // Is the window "locked" into a direction? (gap > threshold, enough samples)
+  lockedDirection(target, minGap = 15) {
+    if(this.samples.length < 5) return null;   // need at least 5 samples
+    const gap = this.gapFromTarget(target);
+    if(gap === null) return null;
+    const progress = this.windowProgress();
+    // Need bigger gap early in window, smaller is enough late
+    const threshold = minGap * (1.5 - progress);
+    if(gap >  threshold) return "YES";
+    if(gap < -threshold) return "NO";
+    return null;
+  },
+
+  getGuardData(target) {
+    const est    = this.settlementEstimate();
+    const avg    = this.avg();
+    const wa     = this.weightedAvg();
+    const gap    = est && target ? est - target : null;
+    const prog   = this.windowProgress();
+    const locked = this.lockedDirection(target);
+    const sampleCount = this.samples.length;
+    const minsSinceStart = prog * 15;
+    const britiEst = this.britiProxy;
+    const britiGap = britiEst && target ? britiEst - target : null;
+
+    return { est, avg, wa, gap, prog, locked, sampleCount,
+             minsSinceStart, britiEst, britiGap,
+             krakenPrice: this.krakenPrice };
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// DEDICATED BINANCE PRICE POLLER
+// Runs independently of the fast WS chain so Binance data is
+// always available even when Binance WS is blocked/falls to Kraken
+// ═══════════════════════════════════════════════════════════════
+let binancePollerTimer = null;
+let binanceWsDedicated = null;
+
+function startBinancePoller(product) {
+  // Clear any existing
+  if(binancePollerTimer)  clearInterval(binancePollerTimer);
+  try{ if(binanceWsDedicated) binanceWsDedicated.close(); }catch(e){}
+
+  const sym = product.replace("-USD","USDT").replace("-USDC","USDT").toLowerCase();
+
+  // Try WebSocket first (sub-second updates)
+  try {
+    binanceWsDedicated = new WebSocket(`wss://stream.binance.com:9443/ws/${sym}@ticker`);
+    binanceWsDedicated.onmessage = e => {
+      try {
+        const d = JSON.parse(e.data);
+        // @ticker gives c = last price, more reliable than @trade p field
+        const p = +(d.c || d.p || 0);
+        if(p > 0) {
+          multiExch.set("binance", p);
+          updateStatusBar();
+        }
+      } catch(err) {}
+    };
+    binanceWsDedicated.onerror = () => startBinanceRESTPoller(product);
+    binanceWsDedicated.onclose = () => {
+      // If WS closed and we have no recent data, fall to REST
+      if(!multiExch.binance || multiExch.isStale("binance", 20000)) {
+        startBinanceRESTPoller(product);
+      }
+    };
+  } catch(e) {
+    startBinanceRESTPoller(product);
+  }
+
+  // Also keep a REST backup polling every 8 seconds regardless
+  binancePollerTimer = setInterval(() => pollBinanceREST(product), 8000);
+}
+
+async function pollBinanceREST(product) {
+  const sym = product.replace("-USD","USDT").replace("-USDC","USDT");
+  try {
+    const d = await fetchJ(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`, 3000);
+    if(d.price && +d.price > 0) {
+      multiExch.set("binance", +d.price);
+      updateStatusBar();
+    }
+  } catch(e) {
+    // Try Binance.US as backup
+    try {
+      const d2 = await fetchJ(`https://api.binance.us/api/v3/ticker/price?symbol=${sym}`, 3000);
+      if(d2.price && +d2.price > 0) {
+        multiExch.set("binance", +d2.price);
+        updateStatusBar();
+      }
+    } catch(e2) {}
+  }
+}
+
+function startBinanceRESTPoller(product) {
+  // Immediate fetch then let the interval handle subsequent ones
+  pollBinanceREST(product);
+}
+const multiExch = {
+  coinbase: null,
+  binance:  null,
+  kraken:   null,
+  lastCb:   0,
+  lastBn:   0,
+  lastKr:   0,
+
+  set(exchange, price) {
+    if(!price || isNaN(price)) return;
+    this[exchange]    = price;
+    this["last"+exchange.charAt(0).toUpperCase()+exchange.slice(1)] = Date.now();
+    if(exchange === "kraken") windowTWAP.updateKraken(price);
+    // Update status bar whenever any exchange price arrives
+    updateStatusBar();
+  },
+
+  britiProxy(target) {
+    // Best BRTI estimate: CB 60% + Kraken 40% when available, else CB alone
+    const cb = this.coinbase, kr = this.kraken;
+    const brti = (cb && kr) ? cb * 0.60 + kr * 0.40
+               : cb ? cb : null;
+    return brti;
+  },
+
+  // Binance divergence vs Coinbase
+  binanceDivergence() {
+    if(!this.binance || !this.coinbase) return null;
+    return this.binance - this.coinbase;
+  },
+
+  isStale(exchange, maxAgeMs = 15000) {
+    const key = "last"+exchange.charAt(0).toUpperCase()+exchange.slice(1);
+    return !this[key] || (Date.now() - this[key]) > maxAgeMs;
+  }
+};
 
 function projectedSettlement(price, latestAvg, trend5, trend10, trend15, timeLeft){
   const urgency = 1 - Math.exp(-((15-timeLeft)/15)*2.5);
@@ -2279,24 +2565,82 @@ function renderResult(r, price, target, p5, p10, p15, product, secondTicker, exc
   <span class="price-big ${cbColor}" id="cbPV">${price.toFixed(2)}</span>
   <span class="price-diff ${(price-target)>0?"yes":"no"}" id="diffV">${(price-target)>=0?"+":""}${(price-target).toFixed(2)}</span>
 </div>
-<div class="exch-strip">
-  <div class="exch-cell">
-    <div class="exch-cell-label">Coinbase</div>
-    <div class="exch-cell-val ${cbColor}" id="cbPV2">${price.toFixed(4)}</div>
+
+${(()=>{
+  const bn   = multiExch.binance;
+  const kr   = multiExch.kraken;
+  const brti = multiExch.britiProxy(target);
+  const britiGap = brti ? brti - target : null;
+  const bnDiv    = (bn && price) ? bn - price : null;
+  const britiColor = britiGap===null?"skip":britiGap>15?"yes":britiGap<-15?"no":"warn";
+
+  const twd    = windowTWAP.getGuardData(target);
+  const twapGap = twd.gap;
+  const locked  = twd.locked;
+  const prog    = twd.prog;
+  const progPct = Math.round(prog*100);
+  const barPct  = twd.est !== null ? Math.min(100, Math.abs(twapGap||0)/50*100) : 0;
+  const barColor = locked==="YES"?"var(--yes)":locked==="NO"?"var(--no)":"var(--warn)";
+
+  let twapWarnHTML = "";
+  let twapCls = "neutral";
+  if(twd.est !== null && twd.sampleCount >= 5){
+    const absGap = Math.abs(twapGap);
+    if(locked==="YES"){
+      twapCls="locked-yes";
+      twapWarnHTML=`<div class="twap-warning yes">⚠ Window avg LOCKED YES (+$${twapGap.toFixed(0)}) — NO bet needs price to drop $${(twapGap+15).toFixed(0)}+ to flip</div>`;
+    } else if(locked==="NO"){
+      twapCls="locked-no";
+      twapWarnHTML=`<div class="twap-warning no">⚠ Window avg LOCKED NO (-$${Math.abs(twapGap).toFixed(0)}) — YES bet needs price to rise $${(Math.abs(twapGap)+15).toFixed(0)}+ to flip</div>`;
+    } else if(absGap<15 && prog>0.5){
+      twapCls="danger";
+      twapWarnHTML=`<div class="twap-warning warn">⚡ Window avg $${twapGap.toFixed(1)} from target — too close to call, avoid betting</div>`;
+    } else if(absGap<15){
+      twapCls="warn";
+      twapWarnHTML=`<div class="twap-warning warn">Window avg ${twapGap>=0?"+":""}$${twapGap.toFixed(1)} from target — direction not locked yet</div>`;
+    }
+  }
+
+  return `
+<div class="exch5-strip">
+  <div class="exch5-cell">
+    <div class="exch5-label">Coinbase (settl)</div>
+    <div class="exch5-val ${cbColor}" id="cbPV2">${price.toFixed(2)}</div>
+    <div class="exch5-sub">${(price-target)>=0?"+":""}${(price-target).toFixed(2)}</div>
   </div>
-  <div class="exch-cell">
-    <div class="exch-cell-label">${secondTicker.ok?secondTicker.source:"2nd Source"}</div>
-    <div class="exch-cell-val ${s2Color}" id="s2PV">${secondTicker.ok?secondTicker.price.toFixed(4):"—"}</div>
+  <div class="exch5-cell">
+    <div class="exch5-label">Binance (lead)</div>
+    <div class="exch5-val ${bn?(bn>target?"yes":"no"):multiExch.isStale("binance",30000)?"warn":"skip"}">${bn?bn.toFixed(2):multiExch.isStale("binance",30000)?"loading...":"—"}</div>
+    <div class="exch5-sub">${bnDiv!==null?(bnDiv>=0?"CB+":"CB")+bnDiv.toFixed(1):bn?"stale":"no data"}</div>
   </div>
-  <div class="exch-cell">
-    <div class="exch-cell-label">Spread</div>
-    <div class="exch-cell-val ${spreadColor}" id="exchSpV">${secondTicker.ok?(exchPress.spread>=0?"+":"")+exchPress.spread.toFixed(4):"—"}</div>
+  <div class="exch5-cell">
+    <div class="exch5-label">Kraken (BRTI)</div>
+    <div class="exch5-val ${kr?(kr>target?"yes":"no"):"skip"}">${kr?kr.toFixed(2):"—"}</div>
+    <div class="exch5-sub">${kr&&target?(kr-target>=0?"+":"")+(kr-target).toFixed(0)+" vs tgt":"—"}</div>
   </div>
-  <div class="exch-cell">
-    <div class="exch-cell-label">Pressure</div>
-    <div class="exch-cell-val ${spreadColor}" id="exchPrV">${exchPress.pressure.replace("EXCHANGE PRESSURE","").replace("BULLISH","BULL").replace("BEARISH","BEAR").trim()||"—"}</div>
+  <div class="exch5-cell">
+    <div class="exch5-label">BRTI Proxy</div>
+    <div class="exch5-val ${britiColor}">${brti?brti.toFixed(2):"CB only"}</div>
+    <div class="exch5-sub">${britiGap!==null?(britiGap>=0?"+":"")+britiGap.toFixed(1)+" vs tgt":"—"}</div>
+  </div>
+  <div class="exch5-cell">
+    <div class="exch5-label">Binance Div</div>
+    <div class="exch5-val ${bnDiv!==null?(Math.abs(bnDiv)>30?"warn":Math.abs(bnDiv)>10?"info":"skip"):"skip"}">${bnDiv!==null?(bnDiv>=0?"+":"")+bnDiv.toFixed(1):bn?"calc...":"—"}</div>
+    <div class="exch5-sub">${bnDiv!==null?(Math.abs(bnDiv)>30?"⚠ big gap":bnDiv>0?"BN leads":"CB leads"):"—"}</div>
   </div>
 </div>
+
+<div class="twap-guard ${twapCls}">
+  <div class="twap-title">📊 Window TWAP Guard <span class="small">${twd.sampleCount} samples · ${progPct}% of window elapsed</span></div>
+  <div class="twap-bar-bg"><div class="twap-bar-fill" style="width:${barPct}%;background:${barColor};"></div></div>
+  <div class="twap-row">
+    <span>Win Avg: <b class="${locked==="YES"?"yes":locked==="NO"?"no":twd.sampleCount<5?"skip":"warn"}">${twd.est?twd.est.toFixed(2):"collecting..."}</b></span>
+    <span>Gap vs Target: <b class="${twapGap!==null?(twapGap>0?"yes":twapGap<0?"no":"skip"):"skip"}">${twapGap!==null?(twapGap>=0?"+":"")+twapGap.toFixed(1):"—"}</b></span>
+    <span>BRTI: <b class="${britiColor}">${brti?brti.toFixed(2):"—"}</b></span>
+  </div>
+  ${twapWarnHTML}
+</div>`;
+})()}
 
 <!-- ══ QUICK STATS ══════════════════════════════════════════════ -->
 ${(()=>{
@@ -2709,7 +3053,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v6.0 · data-driven 7C · conf7 meter · HTF cap · dead zone · hard blocks · coin-agnostic cushion
+    v6.1 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
   </div>
 </div>
 `;}
