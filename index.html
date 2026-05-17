@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v6.5</title>
+<title>Crypto Decision Engine v6.6</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -149,7 +149,7 @@ th{color:var(--info);font-size:11px;}
 .conf7-row{display:flex;justify-content:space-between;align-items:center;margin-top:2px;}
 .conf7-pct{font-size:18px;font-weight:800;line-height:1;}
 .conf7-side{font-size:11px;font-weight:700;margin-left:5px;}
-.conf7-detail{font-size:10px;color:var(--muted);margin-top:2px;}
+.conf7-detail{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.4;word-break:break-word;padding-bottom:6px;}
 
 /* Two smaller stat boxes below (RSI + Early Bias) */
 .stat2-row{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:6px;}
@@ -276,7 +276,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.5</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.6</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -2617,104 +2617,192 @@ function calcGoldenRule(r, ec) {
   const tl     = r.timeLeft || 0;
   const conf   = r.confidence || 0;
   const htf    = r.htf ? r.htf.score : 0;
-  const dec    = r.decision || "";
-  const side   = dec === "BET YES" ? "YES" : "NO";
   const mktY   = (r.mktYes || 0) * 100;
   const mktN   = 100 - mktY;
-  const price  = side === "YES" ? mktY : mktN;  // cents
 
-  // ── 5 Golden Rules from data ───────────────────────────────
-  // Rule 1: Kalshi price 55–75¢ (only positive EV range)
+  // ── FIX 1: Derive side from EXCHANGE direction, not from r.decision ──────
+  // BRTI proxy is the best settlement estimate. If BRTI > target by $15+,
+  // the exchange-confirmed direction is YES, regardless of what the decision engine said.
+  // Counter-trend NO (price above target, HTF ≤ -3) is the only exception.
+  const britiPrice   = (multiExch && multiExch.britiProxy(r.target)) || r.price || 0;
+  const britiGap     = britiPrice && r.target ? britiPrice - r.target : null;  // + = above target
+  const cbGap        = r.price && r.target ? r.price - r.target : 0;
+  const bnGap        = multiExch && multiExch.binance && r.target ? multiExch.binance - r.target : null;
+
+  // Exchange consensus: how many of the 3 exchanges are above target?
+  let exchAbove = 0, exchBelow = 0;
+  if(cbGap > 0) exchAbove++; else if(cbGap < 0) exchBelow++;
+  if(britiGap !== null){ if(britiGap > 0) exchAbove++; else exchBelow++; }
+  if(bnGap !== null){ if(bnGap > 0) exchAbove++; else exchBelow++; }
+
+  const exchConsensusYes = exchAbove >= 2;
+  const exchConsensusNo  = exchBelow >= 2;
+  const britiStrongYes   = britiGap !== null && britiGap > 40;   // $40+ = firmly YES
+  const britiStrongNo    = britiGap !== null && britiGap < -40;  // $40+ below = firmly NO
+  const bnStrongYes      = bnGap !== null && bnGap > 40;
+
+  // Counter-trend NO is valid only when: price is above target BUT HTF ≤ -3 (hourly pulling back)
+  const validCounterTrendNo  = exchConsensusYes && htf <= -3;
+  const validCounterTrendYes = exchConsensusNo  && htf >= 3;
+
+  // Derive exchange-confirmed side
+  let exchSide;
+  if(britiStrongYes && !validCounterTrendNo)       exchSide = "YES";
+  else if(britiStrongNo && !validCounterTrendYes)  exchSide = "NO";
+  else if(exchConsensusYes && !validCounterTrendNo) exchSide = "YES";
+  else if(exchConsensusNo  && !validCounterTrendYes) exchSide = "NO";
+  else exchSide = mktY >= 50 ? "YES" : "NO";   // fall back to Kalshi market price
+
+  // ── FIX 2: Detect exchange vs decision conflict ───────────────────────────
+  const decSide = (r.decision === "BET YES") ? "YES" : "NO";
+  const exchConflict = (exchSide !== decSide) && (britiStrongYes || britiStrongNo);
+  // If there's a conflict, the exchange direction overrides the decision side
+  const side = exchConflict ? exchSide : decSide;
+
+  const price  = side === "YES" ? mktY : mktN;  // cents for chosen side
+
+  // ── 5 Golden Rules ────────────────────────────────────────────────────────
+  // Rule 1: Kalshi price 55–75¢
   const r1Ok   = price >= 55 && price <= 75;
-  const r1Txt  = r1Ok ? `${price.toFixed(0)}¢ ✓ sweet spot` : price < 55 ? `${price.toFixed(0)}¢ — too cheap (<55¢)` : `${price.toFixed(0)}¢ — too expensive (>75¢)`;
   const r1Cls  = r1Ok ? "pass" : "fail";
+  const r1Txt  = r1Ok
+    ? `${price.toFixed(0)}¢ ✓ sweet spot`
+    : price < 55 ? `${price.toFixed(0)}¢ — too cheap (<55¢)`
+    : `${price.toFixed(0)}¢ — too expensive (>75¢)`;
 
-  // Rule 2: Time left 8–13 min (88–100% win rate window)
+  // Rule 2: Time left 8–13 min
   const r2Ok   = tl >= 8 && tl <= 13;
   const r2Warn = (tl >= 2 && tl < 8) || tl > 13;
-  const r2Txt  = r2Ok ? `${tl.toFixed(1)} min ✓ prime window` : tl < 2 ? `${tl.toFixed(1)} min — too late` : tl < 8 ? `${tl.toFixed(1)} min — out of window (4–6m = 30% WR)` : `${tl.toFixed(1)} min — too early`;
-  const r2Cls  = r2Ok ? "pass" : (tl>=2&&tl<4)?"warn":"fail";
+  const r2Cls  = r2Ok ? "pass" : (tl>=2&&tl<4) ? "warn" : "fail";
+  const r2Txt  = r2Ok
+    ? `${tl.toFixed(1)} min ✓ prime window`
+    : tl < 2 ? `${tl.toFixed(1)} min — too late`
+    : tl < 8 ? `${tl.toFixed(1)} min — out of window (4–7m = 30% WR)`
+    : `${tl.toFixed(1)} min — too early`;
 
-  // Rule 3: HTF -4 or below for NO, +1 to +3 for YES (100% combos)
+  // Rule 3: HTF strength — includes FIX 3 for overextended check
   const r3OkYes = side==="YES" && htf >= 1 && htf <= 3;
   const r3OkNo  = side==="NO"  && htf <= -4;
   const r3Ok    = r3OkYes || r3OkNo;
   const r3Warn  = (side==="NO" && htf>=-3 && htf<=-1) || (side==="YES" && htf>=4 && htf<=6);
-  const r3Txt   = r3Ok ? `HTF ${htf>=0?"+":""}${htf} ✓ ideal` : htf===0||htf===2 ? `HTF ${htf} ✗ blocked (0% WR)` : htf>=4&&side==="YES" ? `HTF +${htf} ✗ overextended` : `HTF ${htf>=0?"+":""}${htf} — ok but not ideal`;
-  const r3Cls   = r3Ok ? "pass" : (r3Warn ? "warn" : "fail");
+  const r3Cls   = r3Ok ? "pass" : r3Warn ? "warn" : "fail";
+  const r3Txt   = r3Ok
+    ? `HTF ${htf>=0?"+":""}${htf} ✓ ideal`
+    : htf===0||htf===2 ? `HTF ${htf} ✗ blocked (0% WR)`
+    : htf>=4 && side==="YES" ? `HTF +${htf} ✗ overextended for YES`
+    : `HTF ${htf>=0?"+":""}${htf} — ok but not ideal`;
 
-  // Rule 4: Confidence ≥ 90% (69% WR vs 54% at 80–89%)
+  // Rule 4: Confidence ≥ 90%
   const r4Ok   = conf >= 90;
   const r4Warn = conf >= 80 && conf < 90;
-  const r4Txt  = r4Ok ? `${conf}% ✓ strong` : r4Warn ? `${conf}% — marginal (54% WR)` : `${conf}% — too low`;
   const r4Cls  = r4Ok ? "pass" : r4Warn ? "warn" : "fail";
+  const r4Txt  = r4Ok
+    ? `${conf}% ✓ strong`
+    : r4Warn ? `${conf}% — marginal (54% WR)`
+    : `${conf}% — too low`;
 
-  // Rule 5: BET NO preferred (77% WR vs 67% YES at 90%+ conf)
-  const r5Ok   = side === "NO";
-  const r5Txt  = side==="NO" ? "BET NO ✓ preferred (77% WR)" : "BET YES — lower WR (67%)";
-  const r5Cls  = side==="NO" ? "pass" : "warn";
+  // Rule 5: Signal alignment
+  const toolProb    = side==="YES" ? (r.yes||0) : (r.no||0);
+  const toolAligned = toolProb >= 0.60;
+  const microOk     = (r.microScore||0) >= 3;
+  const r5Ok   = toolAligned && microOk;
+  const r5Warn = toolAligned && !microOk;
+  const r5Cls  = r5Ok ? "pass" : r5Warn ? "warn" : "fail";
+  const r5Txt  = !toolAligned
+    ? `Tool ${side} prob ${(toolProb*100).toFixed(0)}% — weak`
+    : !microOk
+    ? `Micro ${r.microScore||0}/14 — low edge`
+    : `${(toolProb*100).toFixed(0)}% tool prob · micro ${r.microScore||0}/14 ✓`;
 
   const rules = [
-    { label:"Price 55–75¢",    ok:r1Ok, warn:false,  cls:r1Cls, txt:r1Txt },
-    { label:"Time 8–13 min",   ok:r2Ok, warn:r2Warn, cls:r2Cls, txt:r2Txt },
-    { label:"HTF strength",    ok:r3Ok, warn:r3Warn, cls:r3Cls, txt:r3Txt },
-    { label:"Conf ≥ 90%",      ok:r4Ok, warn:r4Warn, cls:r4Cls, txt:r4Txt },
-    { label:"Side (NO best)",  ok:r5Ok, warn:false,  cls:r5Cls, txt:r5Txt },
+    { label:"Price 55–75¢",  ok:r1Ok, warn:false,  cls:r1Cls, txt:r1Txt },
+    { label:"Time 8–13 min", ok:r2Ok, warn:r2Warn, cls:r2Cls, txt:r2Txt },
+    { label:"HTF strength",  ok:r3Ok, warn:r3Warn, cls:r3Cls, txt:r3Txt },
+    { label:"Conf ≥ 90%",    ok:r4Ok, warn:r4Warn, cls:r4Cls, txt:r4Txt },
+    { label:"Signal align",  ok:r5Ok, warn:r5Warn, cls:r5Cls, txt:r5Txt },
   ];
 
-  const passCount = rules.filter(r => r.ok).length;
-  const warnCount = rules.filter(r => !r.ok && r.warn).length;
-  const failCount = rules.filter(r => !r.ok && !r.warn).length;
+  const passCount = rules.filter(c => c.ok).length;
+  const warnCount = rules.filter(c => !c.ok && c.warn).length;
+  const failCount = rules.filter(c => !c.ok && !c.warn).length;
 
-  // Hard blocks that always skip regardless
+  // ── Hard blocks ───────────────────────────────────────────────────────────
   const isNoon = (() => {
-    // Check if current time is 11:45 AM – 12:15 PM
-    const now = new Date();
-    const h = now.getHours(), m = now.getMinutes();
-    return (h === 11 && m >= 45) || (h === 12 && m <= 15);
+    const now = new Date(); const h=now.getHours(), m=now.getMinutes();
+    return (h===11&&m>=45)||(h===12&&m<=15);
   })();
+  const isBadWindow    = tl >= 4 && tl <= 7;
+  const isFeeHigh      = price > 80;
+  const isFeeZero      = price < 15;
+  const htfBlocked     = htf===0 || (htf===2 && side==="YES");
 
-  const isBadWindow = tl >= 4 && tl <= 7;  // 29% win rate
-  const isFeeTrapprice = price > 80 || price < 15;
+  // ── FIX 3: Override verdict when BRTI strongly disagrees with decision ────
+  // If all exchanges point YES by $40+ but golden rule was about to say BET NO
+  // (and it's NOT a valid counter-trend setup), override to SKIP with explanation
+  const britiOverride = exchConflict && (britiStrongYes || britiStrongNo);
 
-  // Determine verdict
-  let verdict, cls, summary;
-  if(isNoon) {
-    verdict = "SKIP"; cls = "skip";
-    summary = "⛔ 12 PM block — 0% win rate in all data. Wait for next window.";
-  } else if(isFeeTrapprice && price > 80) {
-    verdict = "SKIP"; cls = "skip";
-    summary = `⛔ Price ${price.toFixed(0)}¢ is above 80¢ — fee trap, negative EV even on wins.`;
-  } else if(isFeeTrapprice && price < 15) {
-    verdict = "SKIP"; cls = "skip";
-    summary = `⛔ Price ${price.toFixed(0)}¢ too cheap — win profit near zero after fees.`;
-  } else if(htf === 0 || (htf === 2 && side === "YES")) {
-    verdict = "SKIP"; cls = "skip";
-    summary = `⛔ HTF ${htf} — 0% win rate in all 4 datasets. Never bet here.`;
-  } else if(isBadWindow) {
-    verdict = "WAIT"; cls = "wait";
-    summary = `⚠ ${tl.toFixed(1)} min left — 4–7m window has only 30% win rate. Wait for <4m or try next window.`;
-  } else if(passCount >= 4 && failCount === 0) {
-    verdict = "GO"; cls = "go";
-    // Estimate ROI range from data
-    const roiEst = price <= 35 ? "100–350%" : price <= 55 ? "50–150%" : price <= 75 ? "20–60%" : "5–25%";
-    summary = `✅ ${passCount}/5 rules pass — enter in 8–13 min window. Expected ROI ~${roiEst} at $5 stake.`;
-  } else if(passCount >= 3) {
-    verdict = "WAIT"; cls = "wait";
-    summary = `👀 ${passCount}/5 rules pass — conditions forming. Watch for remaining rules to align.`;
-  } else {
-    verdict = "SKIP"; cls = "skip";
-    summary = `Only ${passCount}/5 rules pass. Not enough edge to justify betting.`;
+  // ── Verdict ───────────────────────────────────────────────────────────────
+  let verdict, cls, summary, conflictNote = "";
+
+  // Build conflict warning if exchange direction conflicts
+  if(exchConflict) {
+    const britiDir   = britiGap > 0 ? "YES" : "NO";
+    const britiAmt   = Math.abs(britiGap||0).toFixed(0);
+    const bnStr      = bnGap !== null ? ` · Binance +$${Math.abs(bnGap).toFixed(0)}` : "";
+    conflictNote = `⚠ Exchange direction is ${britiDir} (BRTI +$${britiAmt}${bnStr}) — overriding to BET ${side}. `;
   }
 
-  // ROI estimate for current price
-  const bf   = Math.min(0.07, 0.03 * price/100);
-  const sf   = Math.min(0.07, 0.03);
+  if(isNoon) {
+    verdict="SKIP"; cls="skip";
+    summary="⛔ 12 PM block — 0% win rate in all data. Wait for next window.";
+  } else if(britiOverride && !validCounterTrendNo && !validCounterTrendYes) {
+    // Exchange strongly disagrees — this is the key fix for the reported case
+    verdict="SKIP"; cls="skip";
+    const dir = britiGap > 0 ? "YES" : "NO";
+    const opp = dir==="YES" ? "NO" : "YES";
+    const gap = Math.abs(britiGap||0).toFixed(0);
+    const bnNote = bnGap !== null ? ` · Binance $${Math.abs(bnGap).toFixed(0)} above target` : "";
+    summary = `⛔ All exchanges point ${dir} (+$${gap} BRTI${bnNote}) — BET ${opp} has no edge. ${price.toFixed(0)}¢ is ${opp==="NO"?"falsely cheap — market correctly pricing YES":"falsely expensive"}.`;
+  } else if(isFeeHigh) {
+    verdict="SKIP"; cls="skip";
+    summary=`⛔ Price ${price.toFixed(0)}¢ above 80¢ — fee trap, negative EV even on wins.`;
+  } else if(isFeeZero) {
+    verdict="SKIP"; cls="skip";
+    summary=`⛔ Price ${price.toFixed(0)}¢ too cheap — win profit near zero after fees.`;
+  } else if(htfBlocked) {
+    verdict="SKIP"; cls="skip";
+    summary=`⛔ HTF ${htf} — 0% win rate in all 4 datasets. Never bet here.`;
+  } else if(isBadWindow) {
+    verdict="WAIT"; cls="wait";
+    summary=`⚠ ${tl.toFixed(1)} min left — 4–7m window has only 30% win rate. Wait for <4m or next window.`;
+  } else if(passCount >= 4 && failCount === 0) {
+    verdict="GO"; cls="go";
+    const roiEst = price<=35?"100–350%":price<=55?"50–150%":price<=75?"20–60%":"5–25%";
+    summary=`${conflictNote}✅ ${passCount}/5 rules pass — enter now. Expected ROI ~${roiEst} at $5 stake.`;
+  } else if(passCount >= 3) {
+    verdict="WAIT"; cls="wait";
+    summary=`${conflictNote}👀 ${passCount}/5 rules pass — conditions forming. Watch for remaining to align.`;
+  } else {
+    verdict="SKIP"; cls="skip";
+    summary=`${conflictNote}Only ${passCount}/5 rules pass. Not enough edge.`;
+  }
+
+  // ROI estimate
+  const bf = Math.min(0.07, 0.03*price/100);
+  const sf = Math.min(0.07, 0.03);
   const cost = price/100 + bf;
   const roiIfWin = cost > 0 ? (((1-sf)-cost)/cost*100) : 0;
 
-  return { rules, passCount, warnCount, failCount, verdict, cls, summary, price, roiIfWin, isNoon, isBadWindow };
+  return {
+    rules, passCount, warnCount, failCount,
+    verdict, cls, summary, price, roiIfWin,
+    isNoon, isBadWindow, side,
+    exchConflict, exchSide, decSide,
+    britiGap, bnGap, britiOverride,
+    validCounterTrendNo, validCounterTrendYes
+  };
 }
+
 
 let activeTab = "signals";
 
@@ -2995,7 +3083,10 @@ ${(()=>{
   const goldenHTML = `
     <div class="golden-wrap ${gr.cls}">
       <div class="golden-title">
-        <span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;">⭐ Golden Rule</span>
+        <div>
+          <span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;">⭐ Golden Rule</span>
+          <span style="font-size:13px;font-weight:800;margin-left:6px;" class="${gr.side==="YES"?"yes":"no"}">▶ ${gr.side==="YES"?"BET YES":"BET NO"}</span>
+        </div>
         <span class="golden-badge ${gr.cls}">${gr.verdict}</span>
       </div>
       <div class="golden-rules">${grRulesHTML}</div>
@@ -3345,7 +3436,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
         <div class="cheat-row"><span class="cheat-key">HTF score (BET NO)</span><span class="cheat-val yes">≤ −4 (ideal) or −1 to −3 (ok)</span></div>
         <div class="cheat-row"><span class="cheat-key">HTF score (BET YES)</span><span class="cheat-val yes">+1 to +3 only</span></div>
         <div class="cheat-row"><span class="cheat-key">Tool confidence</span><span class="cheat-val yes">≥ 90%</span></div>
-        <div class="cheat-row" style="border:none"><span class="cheat-key">Preferred side</span><span class="cheat-val yes">BET NO (77% WR vs 67% YES)</span></div>
+        <div class="cheat-row" style="border:none"><span class="cheat-key">Signal alignment</span><span class="cheat-val yes">Tool prob ≥ 60% + micro score ≥ 3</span></div>
       </div>
     </div>
   </div>
@@ -3477,7 +3568,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v6.5 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
+    v6.6 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
   </div>
 </div>
 `;}
