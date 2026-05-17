@@ -216,6 +216,14 @@ th{color:var(--info);font-size:11px;}
 .cheat-avoid .label{color:var(--no);font-weight:700;}
 .cheat-go{background:#040e00;border:1px solid var(--yes);border-radius:6px;padding:7px 10px;margin-bottom:5px;font-size:11px;}
 .cheat-go .label{color:var(--yes);font-weight:700;}
+/* 25002500 Probability summary bar 25002500 */
+.prob-bar{display:flex;align-items:stretch;background:var(--card2);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:5px;}
+.prob-bar-cell{flex:1;padding:5px 7px;min-width:0;}
+.prob-bar-divider{width:1px;background:var(--border);flex-shrink:0;}
+.prob-bar-label{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;margin-bottom:3px;}
+.prob-bar-vals{display:flex;align-items:baseline;gap:3px;white-space:nowrap;}
+.prob-bar-vals span{font-size:12px;font-weight:700;}
+.prob-bar-sep{font-size:9px;color:var(--muted) !important;font-weight:400 !important;}
 .twap-guard{border-radius:8px;padding:9px 12px;margin-top:6px;border:1px solid var(--border);background:var(--card2);}
 .twap-guard.locked-yes{border-color:var(--yes);background:#041208;}
 .twap-guard.locked-no{border-color:var(--no);background:#120404;}
@@ -3011,6 +3019,49 @@ ${(()=>{
     <div class="exch5-val ${bnDiv!==null?(Math.abs(bnDiv)>30?"warn":Math.abs(bnDiv)>10?"info":"skip"):"skip"}">${bnDiv!==null?(bnDiv>=0?"+":"")+bnDiv.toFixed(1):bn?"calc...":"—"}</div>
     <div class="exch5-sub">${bnDiv!==null?(Math.abs(bnDiv)>30?"⚠ big gap":bnDiv>0?"BN leads":"CB leads"):"—"}</div>
     <div class="exch5-sub ${multiExch.ageCls('binance')}">${multiExch.age('binance')}</div>
+  </div>
+</div></div>
+
+<!-- ── Probability summary bar ── -->
+<div class="prob-bar">
+  <div class="prob-bar-cell">
+    <div class="prob-bar-label">Tool</div>
+    <div class="prob-bar-vals">
+      <span class="yes">${(r.yes*100).toFixed(0)}%</span>
+      <span class="prob-bar-sep">YES</span>
+      <span class="no">${(r.no*100).toFixed(0)}%</span>
+      <span class="prob-bar-sep">NO</span>
+    </div>
+  </div>
+  <div class="prob-bar-divider"></div>
+  <div class="prob-bar-cell">
+    <div class="prob-bar-label">Kalshi</div>
+    <div class="prob-bar-vals">
+      <span class="yes">${(r.mktYes*100).toFixed(0)}¢</span>
+      <span class="prob-bar-sep">YES</span>
+      <span class="no">${(r.mktNo*100).toFixed(0)}¢</span>
+      <span class="prob-bar-sep">NO</span>
+    </div>
+  </div>
+  <div class="prob-bar-divider"></div>
+  <div class="prob-bar-cell">
+    <div class="prob-bar-label">Fair</div>
+    <div class="prob-bar-vals">
+      <span class="yes">${(r.fairYes*100).toFixed(0)}%</span>
+      <span class="prob-bar-sep">YES</span>
+      <span class="no">${(r.fairNo*100).toFixed(0)}%</span>
+      <span class="prob-bar-sep">NO</span>
+    </div>
+  </div>
+  <div class="prob-bar-divider"></div>
+  <div class="prob-bar-cell">
+    <div class="prob-bar-label">Edge</div>
+    <div class="prob-bar-vals">
+      <span class="${r.edgeYes>0.06?'yes':r.edgeYes<-0.06?'no':'skip'}">${r.edgeYes>=0?'+':''}${(r.edgeYes*100).toFixed(0)}</span>
+      <span class="prob-bar-sep">Y</span>
+      <span class="${r.edgeNo>0.06?'no':r.edgeNo<-0.06?'yes':'skip'}">${r.edgeNo>=0?'+':''}${(r.edgeNo*100).toFixed(0)}</span>
+      <span class="prob-bar-sep">N</span>
+    </div>
   </div>
 </div>
 
