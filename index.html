@@ -718,10 +718,11 @@ function startAllSockets(){
           const price = +d.price;
           liveState.coinbase = price;
           liveState.lastUpdate = Date.now();
+          liveState.lastCbUpdate = Date.now();   // ← dedicated CB timestamp
           const side = d.side==="buy"?"buy":d.side==="sell"?"sell":"unknown";
           tickStore.push(price, side, +d.last_size||0);
-          windowTWAP.push(price);              // ← Window TWAP tracker
-          multiExch.set("coinbase", price);    // ← Multi-exchange tracker
+          windowTWAP.push(price);
+          multiExch.set("coinbase", price);
           updateLeader(product);
           updateStatusBar();
           drawMiniChart();
@@ -1313,13 +1314,19 @@ const multiExch = {
     return !this[key] || (Date.now() - this[key]) > maxAgeMs;
   },
 
-  // Returns human-readable age string: "2s", "14s", "1m 3s", or "—"
+  // Returns human-readable age string: "live", "2s ago", "1m 3s ago", or "—"
   age(exchange) {
     const key = "last"+exchange.charAt(0).toUpperCase()+exchange.slice(1);
-    if(!this[key]) return "—";
-    const ms = Date.now() - this[key];
+    let ts = this[key] || 0;
+    // For coinbase, liveState.lastCbUpdate is set on every WS tick — use it
+    if(exchange === "coinbase" && typeof liveState !== "undefined" && liveState.lastCbUpdate) {
+      ts = Math.max(ts, liveState.lastCbUpdate);
+    }
+    if(!ts) return "—";
+    const ms = Date.now() - ts;
     if(ms < 0) return "now";
     const s = Math.floor(ms / 1000);
+    if(s < 5)  return "live";
     if(s < 60) return s+"s ago";
     return Math.floor(s/60)+"m "+(s%60)+"s ago";
   },
@@ -1327,7 +1334,11 @@ const multiExch = {
   // CSS class for age: fresh=yes, ok=skip, stale=warn, very stale=no
   ageCls(exchange, freshMs=5000, staleMs=15000) {
     const key = "last"+exchange.charAt(0).toUpperCase()+exchange.slice(1);
-    if(!this[key]) return "no";
+    let ts = this[key] || 0;
+    if(exchange === "coinbase" && typeof liveState !== "undefined" && liveState.lastCbUpdate) {
+      ts = Math.max(ts, liveState.lastCbUpdate);
+    }
+    if(!ts) return "no";
     const ms = Date.now() - this[key];
     if(ms < freshMs)  return "yes";
     if(ms < staleMs)  return "skip";
@@ -2918,7 +2929,8 @@ function renderResult(r, price, target, p5, p10, p15, product, secondTicker, exc
 ${(()=>{
   const bn   = multiExch.binance;
   const kr   = multiExch.kraken;
-  const brti = multiExch.britiProxy(target);
+  // Use live `price` (current Coinbase value from run()) for BRTI — more reliable than multiExch.coinbase
+  const brti = (price && kr) ? price * 0.60 + kr * 0.40 : price || null;
   const britiGap = brti ? brti - target : null;
   const bnDiv    = (bn && price) ? bn - price : null;
   const britiColor = britiGap===null?"skip":britiGap>15?"yes":britiGap<-15?"no":"warn";
@@ -3605,9 +3617,14 @@ async function run(silent=false){
     let price;
     if(liveState.coinbase && Date.now()-liveState.lastUpdate < 8000){
       price = liveState.coinbase;
+      // Sync multiExch and lastCbUpdate so age display stays current
+      multiExch.set("coinbase", price);
+      liveState.lastCbUpdate = Date.now();
     } else {
       price = await getRestTicker(product);
       tickStore.push(price,"unknown",0);
+      multiExch.set("coinbase", price);
+      liveState.lastCbUpdate = Date.now();
     }
 
     if(!liveState.fastPrice && secondTicker.ok){
