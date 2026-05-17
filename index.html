@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v6.3</title>
+<title>Crypto Decision Engine v6.5</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -181,7 +181,41 @@ th{color:var(--info);font-size:11px;}
 .outcome-loss{color:var(--no);font-weight:700;}
 .outcome-pending{color:var(--muted);}
 .outcome-skip{color:var(--skip);}
-/* ── Window TWAP Guard ── */
+/* ── Golden Rule Indicator ── */
+.golden-wrap{margin-top:8px;padding:10px 12px;border-radius:8px;border:2px solid var(--border);}
+.golden-wrap.go{border-color:#f1c40f;background:#0e0e00;}
+.golden-wrap.wait{border-color:var(--warn);background:#0e0800;}
+.golden-wrap.skip{border-color:var(--border);background:var(--card);}
+.golden-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+.golden-badge{font-size:15px;font-weight:800;letter-spacing:.5px;padding:3px 12px;border-radius:20px;}
+.golden-badge.go{background:#f1c40f;color:#000;}
+.golden-badge.wait{background:var(--warn);color:#000;}
+.golden-badge.skip{background:#2b3643;color:var(--muted);}
+.golden-rules{display:grid;grid-template-columns:1fr 1fr;gap:3px;}
+.gr-row{display:flex;align-items:center;gap:5px;font-size:11px;padding:2px 0;}
+.gr-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+.gr-dot.pass{background:var(--yes);}
+.gr-dot.fail{background:var(--no);}
+.gr-dot.warn{background:var(--warn);}
+.gr-text{color:var(--text);}
+.gr-sub{font-size:10px;color:var(--muted);}
+.golden-summary{font-size:11px;margin-top:6px;padding-top:6px;border-top:1px solid var(--border);color:var(--muted);}
+.golden-roi{font-size:13px;font-weight:700;}
+
+/* ── Cheat Sheet Tab ── */
+.cheat-section{margin-bottom:14px;}
+.cheat-section h3{font-size:13px;font-weight:700;color:var(--info);margin:0 0 6px 0;text-transform:uppercase;letter-spacing:.5px;}
+.cheat-row{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px;}
+.cheat-row:last-child{border-bottom:none;}
+.cheat-key{color:var(--muted);font-size:11px;flex:0 0 45%;}
+.cheat-val{font-size:12px;font-weight:700;text-align:right;}
+.cheat-block{background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px;}
+.cheat-combo{background:var(--card);border-radius:6px;padding:7px 10px;margin-bottom:5px;font-size:11px;line-height:1.5;}
+.cheat-combo .label{font-weight:700;font-size:12px;margin-bottom:2px;}
+.cheat-avoid{background:#1a0505;border:1px solid var(--no);border-radius:6px;padding:7px 10px;margin-bottom:5px;font-size:11px;}
+.cheat-avoid .label{color:var(--no);font-weight:700;}
+.cheat-go{background:#040e00;border:1px solid var(--yes);border-radius:6px;padding:7px 10px;margin-bottom:5px;font-size:11px;}
+.cheat-go .label{color:var(--yes);font-weight:700;}
 .twap-guard{border-radius:8px;padding:9px 12px;margin-top:6px;border:1px solid var(--border);background:var(--card2);}
 .twap-guard.locked-yes{border-color:var(--yes);background:#041208;}
 .twap-guard.locked-no{border-color:var(--no);background:#120404;}
@@ -242,7 +276,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.3</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.5</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -663,10 +697,14 @@ function startAllSockets(){
 
   // Start dedicated Binance price poller (independent of fast WS chain)
   startBinancePoller(product);
+  // Start dedicated Kraken WS always running in parallel (not a fallback)
+  startKrakenDedicated(product);
 
   ["cbTickerWs","cbL2Ws","fastWs","krakenWs"].forEach(k=>{
     try{ if(window[k]) window[k].close(); }catch(e){}
   });
+  // Also close dedicated Kraken WS
+  try{ if(krakenDedicatedWs) krakenDedicatedWs.close(); }catch(e){}
 
   try{
     window.cbTickerWs = new WebSocket("wss://ws-feed.exchange.coinbase.com");
@@ -747,29 +785,84 @@ function startAllSockets(){
   futuresTimer = setInterval(()=>fetchFuturesPremium(product), 30000);
 }
 
-function startKrakenFallback(product){
-  const map={"BTC-USD":"BTC/USD","ETH-USD":"ETH/USD","SOL-USD":"SOL/USD","XRP-USD":"XRP/USD","DOGE-USD":"DOGE/USD"};
-  const sym=map[product]; if(!sym) return;
-  try{
-    window.krakenWs = new WebSocket("wss://ws.kraken.com/v2");
-    window.krakenWs.onopen=()=>{
-      window.krakenWs.send(JSON.stringify({method:"subscribe",params:{channel:"ticker",symbol:[sym]}}));
-    };
-    window.krakenWs.onmessage=e=>{
-      try{
-        const d=JSON.parse(e.data);
-        if(d.channel==="ticker" && d.data?.length){
-          const p=+(d.data[0].last||d.data[0].bid);
-          if(p>0){
-            liveState.fastPrice=p;
-            liveState.fastSource="Kraken";
-            multiExch.set("kraken", p);       // ← Track Kraken for BRTI proxy
-            updateLeader(product);
+// ── Dedicated Kraken WS — always runs in parallel, not a fallback ──────────
+let krakenDedicatedWs  = null;
+let krakenPollerTimer  = null;
+
+function startKrakenDedicated(product) {
+  const map = {"BTC-USD":"BTC/USD","ETH-USD":"ETH/USD","SOL-USD":"SOL/USD","XRP-USD":"XRP/USD","DOGE-USD":"DOGE/USD"};
+  const sym = map[product];
+  if(!sym) return;
+
+  // Clear existing
+  try{ if(krakenDedicatedWs) krakenDedicatedWs.close(); }catch(e){}
+  if(krakenPollerTimer) clearInterval(krakenPollerTimer);
+
+  const connect = () => {
+    try{
+      krakenDedicatedWs = new WebSocket("wss://ws.kraken.com/v2");
+      krakenDedicatedWs.onopen = () => {
+        krakenDedicatedWs.send(JSON.stringify({method:"subscribe",params:{channel:"ticker",symbol:[sym]}}));
+      };
+      krakenDedicatedWs.onmessage = e => {
+        try{
+          const d = JSON.parse(e.data);
+          if(d.channel==="ticker" && d.data?.length){
+            const p = +(d.data[0].last || d.data[0].bid);
+            if(p > 0){
+              multiExch.set("kraken", p);
+              // Only use Kraken as fastPrice fallback if Binance WS is gone
+              if(!multiExch.binance || multiExch.isStale("binance", 15000)){
+                liveState.fastPrice  = p;
+                liveState.fastSource = "Kraken";
+                updateLeader(product);
+              }
+            }
           }
-        }
-      }catch(err){}
-    };
+        }catch(err){}
+      };
+      // Auto-reconnect on close
+      krakenDedicatedWs.onclose = () => {
+        setTimeout(connect, 3000);   // reconnect after 3s
+      };
+      krakenDedicatedWs.onerror = () => {
+        pollKrakenREST(product);     // immediate REST fallback
+      };
+    }catch(e){
+      pollKrakenREST(product);
+    }
+  };
+
+  connect();
+
+  // REST backup every 10s regardless of WS state
+  krakenPollerTimer = setInterval(() => pollKrakenREST(product), 10000);
+  pollKrakenREST(product);   // immediate first poll
+}
+
+async function pollKrakenREST(product) {
+  const krakenMap = {"BTC-USD":"XBTUSD","ETH-USD":"ETHUSD","SOL-USD":"SOLUSD","XRP-USD":"XRPUSD","DOGE-USD":"DOGEUSD"};
+  const pair = krakenMap[product];
+  if(!pair) return;
+  try{
+    const d = await fetchJ(`https://api.kraken.com/0/public/Ticker?pair=${pair}`, 4000);
+    const key = d.result ? Object.keys(d.result)[0] : null;
+    if(key){
+      const p = (+d.result[key].c[0]);   // c[0] = last trade price
+      if(p > 0) multiExch.set("kraken", p);
+    }
   }catch(e){}
+}
+
+// Legacy name kept for any remaining call sites — now just delegates
+function startKrakenFallback(product){
+  // Binance WS failed — Kraken dedicated WS already running,
+  // but make sure fastPrice is set from Kraken if available
+  if(multiExch.kraken && !multiExch.isStale("kraken", 15000)){
+    liveState.fastPrice  = multiExch.kraken;
+    liveState.fastSource = "Kraken";
+    updateLeader(product);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2516,6 +2609,113 @@ function calcEarlyEntry(r) {
 }
 
 
+// ═══════════════════════════════════════════════════════════════
+// GOLDEN RULE INDICATOR
+// Derived from real data analysis across 178 bets / 4 datasets
+// ═══════════════════════════════════════════════════════════════
+function calcGoldenRule(r, ec) {
+  const tl     = r.timeLeft || 0;
+  const conf   = r.confidence || 0;
+  const htf    = r.htf ? r.htf.score : 0;
+  const dec    = r.decision || "";
+  const side   = dec === "BET YES" ? "YES" : "NO";
+  const mktY   = (r.mktYes || 0) * 100;
+  const mktN   = 100 - mktY;
+  const price  = side === "YES" ? mktY : mktN;  // cents
+
+  // ── 5 Golden Rules from data ───────────────────────────────
+  // Rule 1: Kalshi price 55–75¢ (only positive EV range)
+  const r1Ok   = price >= 55 && price <= 75;
+  const r1Txt  = r1Ok ? `${price.toFixed(0)}¢ ✓ sweet spot` : price < 55 ? `${price.toFixed(0)}¢ — too cheap (<55¢)` : `${price.toFixed(0)}¢ — too expensive (>75¢)`;
+  const r1Cls  = r1Ok ? "pass" : "fail";
+
+  // Rule 2: Time left 8–13 min (88–100% win rate window)
+  const r2Ok   = tl >= 8 && tl <= 13;
+  const r2Warn = (tl >= 2 && tl < 8) || tl > 13;
+  const r2Txt  = r2Ok ? `${tl.toFixed(1)} min ✓ prime window` : tl < 2 ? `${tl.toFixed(1)} min — too late` : tl < 8 ? `${tl.toFixed(1)} min — out of window (4–6m = 30% WR)` : `${tl.toFixed(1)} min — too early`;
+  const r2Cls  = r2Ok ? "pass" : (tl>=2&&tl<4)?"warn":"fail";
+
+  // Rule 3: HTF -4 or below for NO, +1 to +3 for YES (100% combos)
+  const r3OkYes = side==="YES" && htf >= 1 && htf <= 3;
+  const r3OkNo  = side==="NO"  && htf <= -4;
+  const r3Ok    = r3OkYes || r3OkNo;
+  const r3Warn  = (side==="NO" && htf>=-3 && htf<=-1) || (side==="YES" && htf>=4 && htf<=6);
+  const r3Txt   = r3Ok ? `HTF ${htf>=0?"+":""}${htf} ✓ ideal` : htf===0||htf===2 ? `HTF ${htf} ✗ blocked (0% WR)` : htf>=4&&side==="YES" ? `HTF +${htf} ✗ overextended` : `HTF ${htf>=0?"+":""}${htf} — ok but not ideal`;
+  const r3Cls   = r3Ok ? "pass" : (r3Warn ? "warn" : "fail");
+
+  // Rule 4: Confidence ≥ 90% (69% WR vs 54% at 80–89%)
+  const r4Ok   = conf >= 90;
+  const r4Warn = conf >= 80 && conf < 90;
+  const r4Txt  = r4Ok ? `${conf}% ✓ strong` : r4Warn ? `${conf}% — marginal (54% WR)` : `${conf}% — too low`;
+  const r4Cls  = r4Ok ? "pass" : r4Warn ? "warn" : "fail";
+
+  // Rule 5: BET NO preferred (77% WR vs 67% YES at 90%+ conf)
+  const r5Ok   = side === "NO";
+  const r5Txt  = side==="NO" ? "BET NO ✓ preferred (77% WR)" : "BET YES — lower WR (67%)";
+  const r5Cls  = side==="NO" ? "pass" : "warn";
+
+  const rules = [
+    { label:"Price 55–75¢",    ok:r1Ok, warn:false,  cls:r1Cls, txt:r1Txt },
+    { label:"Time 8–13 min",   ok:r2Ok, warn:r2Warn, cls:r2Cls, txt:r2Txt },
+    { label:"HTF strength",    ok:r3Ok, warn:r3Warn, cls:r3Cls, txt:r3Txt },
+    { label:"Conf ≥ 90%",      ok:r4Ok, warn:r4Warn, cls:r4Cls, txt:r4Txt },
+    { label:"Side (NO best)",  ok:r5Ok, warn:false,  cls:r5Cls, txt:r5Txt },
+  ];
+
+  const passCount = rules.filter(r => r.ok).length;
+  const warnCount = rules.filter(r => !r.ok && r.warn).length;
+  const failCount = rules.filter(r => !r.ok && !r.warn).length;
+
+  // Hard blocks that always skip regardless
+  const isNoon = (() => {
+    // Check if current time is 11:45 AM – 12:15 PM
+    const now = new Date();
+    const h = now.getHours(), m = now.getMinutes();
+    return (h === 11 && m >= 45) || (h === 12 && m <= 15);
+  })();
+
+  const isBadWindow = tl >= 4 && tl <= 7;  // 29% win rate
+  const isFeeTrapprice = price > 80 || price < 15;
+
+  // Determine verdict
+  let verdict, cls, summary;
+  if(isNoon) {
+    verdict = "SKIP"; cls = "skip";
+    summary = "⛔ 12 PM block — 0% win rate in all data. Wait for next window.";
+  } else if(isFeeTrapprice && price > 80) {
+    verdict = "SKIP"; cls = "skip";
+    summary = `⛔ Price ${price.toFixed(0)}¢ is above 80¢ — fee trap, negative EV even on wins.`;
+  } else if(isFeeTrapprice && price < 15) {
+    verdict = "SKIP"; cls = "skip";
+    summary = `⛔ Price ${price.toFixed(0)}¢ too cheap — win profit near zero after fees.`;
+  } else if(htf === 0 || (htf === 2 && side === "YES")) {
+    verdict = "SKIP"; cls = "skip";
+    summary = `⛔ HTF ${htf} — 0% win rate in all 4 datasets. Never bet here.`;
+  } else if(isBadWindow) {
+    verdict = "WAIT"; cls = "wait";
+    summary = `⚠ ${tl.toFixed(1)} min left — 4–7m window has only 30% win rate. Wait for <4m or try next window.`;
+  } else if(passCount >= 4 && failCount === 0) {
+    verdict = "GO"; cls = "go";
+    // Estimate ROI range from data
+    const roiEst = price <= 35 ? "100–350%" : price <= 55 ? "50–150%" : price <= 75 ? "20–60%" : "5–25%";
+    summary = `✅ ${passCount}/5 rules pass — enter in 8–13 min window. Expected ROI ~${roiEst} at $5 stake.`;
+  } else if(passCount >= 3) {
+    verdict = "WAIT"; cls = "wait";
+    summary = `👀 ${passCount}/5 rules pass — conditions forming. Watch for remaining rules to align.`;
+  } else {
+    verdict = "SKIP"; cls = "skip";
+    summary = `Only ${passCount}/5 rules pass. Not enough edge to justify betting.`;
+  }
+
+  // ROI estimate for current price
+  const bf   = Math.min(0.07, 0.03 * price/100);
+  const sf   = Math.min(0.07, 0.03);
+  const cost = price/100 + bf;
+  const roiIfWin = cost > 0 ? (((1-sf)-cost)/cost*100) : 0;
+
+  return { rules, passCount, warnCount, failCount, verdict, cls, summary, price, roiIfWin, isNoon, isBadWindow };
+}
+
 let activeTab = "signals";
 
 // Refresh exchange age labels every second (lightweight — no re-render)
@@ -2783,6 +2983,28 @@ ${(()=>{
       }</div>
     </div>`;
 
+  // Golden Rule indicator
+  const gr = calcGoldenRule(r, ec);
+  const grRulesHTML = gr.rules.map(rule => `
+    <div class="gr-row">
+      <div class="gr-dot ${rule.cls}"></div>
+      <div>
+        <div class="gr-text">${rule.txt}</div>
+      </div>
+    </div>`).join("");
+  const goldenHTML = `
+    <div class="golden-wrap ${gr.cls}">
+      <div class="golden-title">
+        <span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;">⭐ Golden Rule</span>
+        <span class="golden-badge ${gr.cls}">${gr.verdict}</span>
+      </div>
+      <div class="golden-rules">${grRulesHTML}</div>
+      <div class="golden-summary">
+        ${gr.summary}
+        ${gr.verdict==="GO"?`<br><span class="golden-roi ${ec.conf7Cls}">ROI if win: ${gr.roiIfWin>=0?"+":""}${gr.roiIfWin.toFixed(0)}% on $5 = $${(gr.roiIfWin/100*5).toFixed(2)}</span>`:""}
+      </div>
+    </div>`;
+
   const passColor = ec.passCount>=6?"yes":ec.passCount>=4?"warn":"skip";
   const winLabel  = ec.inWindow
     ? `<span class="${passColor}" style="font-size:11px;">${ec.passCount}/7 · in window</span>`
@@ -2808,6 +3030,8 @@ ${bannerHTML}
   <div class="ec-grid">${condHTML}</div>
   <!-- 7C Confidence meter -->
   ${conf7HTML}
+  <!-- Golden Rule indicator -->
+  ${goldenHTML}
   <!-- RSI + Early Bias as two small boxes below -->
   <div class="stat2-row">
     <div class="stat2-box">
@@ -2836,6 +3060,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
   <button class="tab-btn ${activeTab==='scalp'?'active':''}"   data-tab="scalp"   onclick="switchTab('scalp')">Scalp</button>
   <button class="tab-btn ${activeTab==='trade'?'active':''}"   data-tab="trade"   onclick="switchTab('trade')">💰 Trade</button>
   <button class="tab-btn ${activeTab==='log'?'active':''}"     data-tab="log"     onclick="switchTab('log')">📋 Log</button>
+  <button class="tab-btn ${activeTab==='cheat'?'active':''}"   data-tab="cheat"   onclick="switchTab('cheat')">⭐ Rules</button>
   <button class="tab-btn ${activeTab==='detail'?'active':''}"  data-tab="detail"  onclick="switchTab('detail')">Detail</button>
 </div>
 
@@ -3107,6 +3332,121 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
   </div>
 </div>
 
+<!-- ══ TAB: CHEAT SHEET ═══════════════════════════════════════ -->
+<div class="tab-pane ${activeTab==='cheat'?'active':''}" id="tab-cheat">
+
+  <div class="cheat-block">
+    <div class="cheat-section">
+      <h3>⭐ Golden Rule — 5 Must-Pass Before Any Bet</h3>
+      <div class="cheat-go">
+        <div class="label">✅ All 5 must be true to enter</div>
+        <div class="cheat-row"><span class="cheat-key">Kalshi price you pay</span><span class="cheat-val yes">55¢ – 75¢ only</span></div>
+        <div class="cheat-row"><span class="cheat-key">Time left in window</span><span class="cheat-val yes">8 – 13 minutes</span></div>
+        <div class="cheat-row"><span class="cheat-key">HTF score (BET NO)</span><span class="cheat-val yes">≤ −4 (ideal) or −1 to −3 (ok)</span></div>
+        <div class="cheat-row"><span class="cheat-key">HTF score (BET YES)</span><span class="cheat-val yes">+1 to +3 only</span></div>
+        <div class="cheat-row"><span class="cheat-key">Tool confidence</span><span class="cheat-val yes">≥ 90%</span></div>
+        <div class="cheat-row" style="border:none"><span class="cheat-key">Preferred side</span><span class="cheat-val yes">BET NO (77% WR vs 67% YES)</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cheat-block">
+    <div class="cheat-section">
+      <h3>⛔ Hard Blocks — Never Bet When Any of These</h3>
+      <div class="cheat-avoid">
+        <div class="label">Skip immediately — no exceptions</div>
+        <div class="cheat-row"><span class="cheat-key">Time of day</span><span class="cheat-val no">11:45 AM – 12:15 PM (0% WR, 19 losses)</span></div>
+        <div class="cheat-row"><span class="cheat-key">Kalshi price &gt; 80¢</span><span class="cheat-val no">Negative EV even on wins (fee trap)</span></div>
+        <div class="cheat-row"><span class="cheat-key">Kalshi price &lt; 15¢</span><span class="cheat-val no">Win profit near zero after fees</span></div>
+        <div class="cheat-row"><span class="cheat-key">HTF score = 0</span><span class="cheat-val no">0% win rate in all data</span></div>
+        <div class="cheat-row"><span class="cheat-key">HTF score = +2 (BET YES)</span><span class="cheat-val no">0% win rate — 5/5 lost</span></div>
+        <div class="cheat-row"><span class="cheat-key">HTF score ≥ +4 (BET YES)</span><span class="cheat-val no">29% win rate — overextended</span></div>
+        <div class="cheat-row" style="border:none"><span class="cheat-key">Time left 4 – 7 min</span><span class="cheat-val no">30% win rate — worst entry window</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cheat-block">
+    <div class="cheat-section">
+      <h3>🏆 100% Win Rate Combos (from real data)</h3>
+      <div class="cheat-combo">
+        <div class="label" style="color:var(--yes)">Combo 1 — Best ROI</div>
+        HTF −3 · Price 35–55¢ · Time 3–7 min · 6/6 wins · ROI +151%
+      </div>
+      <div class="cheat-combo">
+        <div class="label" style="color:var(--yes)">Combo 2 — High ROI Early</div>
+        HTF ≤−4 · Price 35–55¢ · Time 7–10 min · 4/4 wins · ROI +111%
+      </div>
+      <div class="cheat-combo">
+        <div class="label" style="color:var(--yes)">Combo 3 — YES side entry</div>
+        HTF +1 to +3 · Price 55–75¢ · Time 7–10 min · 6/6 wins · ROI +26%
+      </div>
+      <div class="cheat-combo">
+        <div class="label" style="color:var(--yes)">Combo 4 — Conservative</div>
+        HTF −1 to −2 · Price 75–85¢ · Time 7–10 min · 4/4 wins · ROI +23%
+      </div>
+    </div>
+  </div>
+
+  <div class="cheat-block">
+    <div class="cheat-section">
+      <h3>📊 Expected ROI by Kalshi Price Paid</h3>
+      <div class="cheat-row"><span class="cheat-key">10–25¢</span><span class="cheat-val yes">+216% EV · 71% WR · Best price range</span></div>
+      <div class="cheat-row"><span class="cheat-key">25–40¢</span><span class="cheat-val yes">+151% EV · 100% WR · Ideal</span></div>
+      <div class="cheat-row"><span class="cheat-key">40–55¢</span><span class="cheat-val yes">+49% EV · 75% WR · Good</span></div>
+      <div class="cheat-row"><span class="cheat-key">55–70¢</span><span class="cheat-val warn">+3% EV · 71% WR · Marginal</span></div>
+      <div class="cheat-row"><span class="cheat-key">70–80¢</span><span class="cheat-val warn">+3% EV · 82% WR · Marginal</span></div>
+      <div class="cheat-row"><span class="cheat-key">80–90¢</span><span class="cheat-val no">−50% EV · 47% WR · Avoid</span></div>
+      <div class="cheat-row" style="border:none"><span class="cheat-key">90¢+</span><span class="cheat-val no">−29% EV · 74% WR · Fee trap</span></div>
+    </div>
+  </div>
+
+  <div class="cheat-block">
+    <div class="cheat-section">
+      <h3>⏱ Win Rate by Time Left</h3>
+      <div class="cheat-row"><span class="cheat-key">&gt;12 min left</span><span class="cheat-val yes">100% WR · +52% ROI · avg price 62¢</span></div>
+      <div class="cheat-row"><span class="cheat-key">10–12 min left</span><span class="cheat-val yes">71% WR · +41% ROI · avg price 58¢</span></div>
+      <div class="cheat-row"><span class="cheat-key">8–10 min left ★</span><span class="cheat-val yes">88% WR · +26% ROI · avg price 71¢</span></div>
+      <div class="cheat-row"><span class="cheat-key">4–6 min left</span><span class="cheat-val no">30% WR · −70% ROI · AVOID</span></div>
+      <div class="cheat-row"><span class="cheat-key">2–4 min left</span><span class="cheat-val warn">100% WR · −1% ROI · price 95¢ (fee trap)</span></div>
+      <div class="cheat-row" style="border:none"><span class="cheat-key">&lt;2 min left</span><span class="cheat-val warn">77% WR · −27% ROI · price 99¢ (fee trap)</span></div>
+    </div>
+  </div>
+
+  <div class="cheat-block">
+    <div class="cheat-section">
+      <h3>🕐 Best Hours (from data)</h3>
+      <div class="cheat-row"><span class="cheat-key">3 PM (15:00)</span><span class="cheat-val yes">100% WR — best hour overall</span></div>
+      <div class="cheat-row"><span class="cheat-key">5 AM (05:00)</span><span class="cheat-val yes">100% WR — pre-market clear direction</span></div>
+      <div class="cheat-row"><span class="cheat-key">10 PM (22:00)</span><span class="cheat-val yes">100% WR — thin book, decisive</span></div>
+      <div class="cheat-row"><span class="cheat-key">9 PM (21:00)</span><span class="cheat-val yes">67% WR — good late night</span></div>
+      <div class="cheat-row" style="border:none"><span class="cheat-key">12 PM (noon)</span><span class="cheat-val no">0% WR — worst hour, hard block</span></div>
+    </div>
+  </div>
+
+  <div class="cheat-block">
+    <div class="cheat-section">
+      <h3>💡 Quick Decision Flow</h3>
+      <div class="cheat-combo" style="line-height:1.7;">
+        <b>Step 1</b> — Is the Golden Rule badge <span class="yes">GO</span>? If not, stop.<br>
+        <b>Step 2</b> — Is the TWAP guard showing LOCKED in your direction? ✓<br>
+        <b>Step 3</b> — Is Kalshi price 55–75¢ for your side? ✓<br>
+        <b>Step 4</b> — Is time left 8–13 min? ✓<br>
+        <b>Step 5</b> — Enter now. Don't wait for more confirmation — waiting costs ROI.
+      </div>
+      <div class="cheat-avoid" style="margin-top:6px;">
+        <div class="label">The #1 mistake</div>
+        Betting at 90¢+ because "it's almost certain." You win but make 1¢ per $1 risked. Fee eats everything. The certainty is already priced in — there's no edge left.
+      </div>
+    </div>
+  </div>
+
+  <div class="small" style="text-align:center;margin-top:8px;color:var(--border2);">
+    Based on 178 real bets · 4 datasets · May 13–16 2026
+  </div>
+
+</div>
+
 <!-- ══ TAB: DETAIL ════════════════════════════════════════════ -->
 <div class="tab-pane ${activeTab==='detail'?'active':''}" id="tab-detail">
   <div class="section">
@@ -3137,7 +3477,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v6.3 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
+    v6.5 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
   </div>
 </div>
 `;}
