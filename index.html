@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Crypto Decision Engine v6.6</title>
+<title>Crypto Decision Engine v6.7</title>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
 :root{
@@ -284,7 +284,7 @@ th{color:var(--info);font-size:11px;}
 
 <!-- ── Header ── -->
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;">
-  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.6</span></div>
+  <div style="font-size:15px;font-weight:700;">Decision Engine <span class="info">v6.7</span></div>
   <div id="refreshStatus" class="status-txt" style="margin:0;"></div>
 </div>
 
@@ -539,9 +539,9 @@ const kalshiVel = {
   }
 };
 
-let kalshiBgTimer = null;
 async function startKalshiBgPoller(){
   if(kalshiBgTimer) clearInterval(kalshiBgTimer);
+  // Poll every 8s (was 12s) — more attempts means more chances to succeed
   kalshiBgTimer = setInterval(async ()=>{
     const product = $("coin").value;
     const k = await fetchKalshiViaProxy(product);
@@ -556,8 +556,9 @@ async function startKalshiBgPoller(){
       if($("market") && !$("market").dataset.manualEdit){
         $("market").value = k.yesMid.toFixed(4);
       }
+      clearErr(); // clear any "pull failed" error once we succeed
     }
-  }, 12000);
+  }, 8000);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -938,16 +939,62 @@ function parseKalshi(text){
 }
 
 async function fetchKalshiViaProxy(product){
-  const series=KALSHI_SERIES[product]; if(!series) return null;
-  const enc=encodeURIComponent(kalshiUrl(series));
-  const attempts=[
-    ()=>fetchJ(`https://api.allorigins.win/get?url=${enc}`,3500).then(j=>parseKalshi(j.contents)),
-    ()=>fetchJ(`https://corsproxy.io/?url=${enc}`,3500).then(j=>parseKalshi(JSON.stringify(j))),
-    ()=>fetchJ(`https://api.codetabs.com/v1/proxy?quest=${enc}`,3500).then(j=>parseKalshi(j))
+  const series = KALSHI_SERIES[product];
+  if(!series) return null;
+
+  const url = kalshiUrl(series);
+  const enc = encodeURIComponent(url);
+
+  // ── 7 proxy attempts in order of reliability ──────────────
+  const attempts = [
+    // 1. Direct Kalshi API (works if CORS allows it from browser)
+    () => fetchJ(url, 4000).then(j => parseKalshi(j)),
+
+    // 2. allorigins — most reliable CORS proxy
+    () => fetchJ(`https://api.allorigins.win/get?url=${enc}`, 5000)
+          .then(j => parseKalshi(j.contents)),
+
+    // 3. corsproxy.io
+    () => fetchJ(`https://corsproxy.io/?url=${enc}`, 5000)
+          .then(j => parseKalshi(JSON.stringify(j))),
+
+    // 4. allorigins raw endpoint (different response format)
+    () => fetchJ(`https://api.allorigins.win/raw?url=${enc}`, 5000)
+          .then(j => parseKalshi(j)),
+
+    // 5. codetabs proxy
+    () => fetchJ(`https://api.codetabs.com/v1/proxy?quest=${enc}`, 5000)
+          .then(j => parseKalshi(j)),
+
+    // 6. htmldriven proxy
+    () => fetchJ(`https://thingproxy.freeboard.io/fetch/${url}`, 5000)
+          .then(j => parseKalshi(j)),
+
+    // 7. jsonp.afeld.me
+    () => fetchJ(`https://cors.eu.org/${url}`, 5000)
+          .then(j => parseKalshi(j)),
   ];
-  try{
-    return await Promise.any(attempts.map(fn=>fn().then(x=>{ if(!x) throw new Error("null"); return x; })));
-  }catch(e){ return null; }
+
+  // Try all in parallel — return first that succeeds
+  try {
+    return await Promise.any(
+      attempts.map(fn =>
+        fn().then(x => {
+          if(!x || x.target == null) throw new Error("null");
+          return x;
+        }).catch(() => { throw new Error("failed"); })
+      )
+    );
+  } catch(e) {
+    // Sequential fallback — try each one by one with longer timeout
+    for(const fn of attempts) {
+      try {
+        const result = await fn();
+        if(result && result.target != null) return result;
+      } catch(e2) { /* try next */ }
+    }
+    return null;
+  }
 }
 
 async function refreshKalshiTarget(showStatus){
@@ -956,7 +1003,13 @@ async function refreshKalshiTarget(showStatus){
   const btn=$("btnTargetRefresh"); if(btn) btn.textContent="…";
   const k=await fetchKalshiViaProxy(product);
   if(btn) btn.textContent="↻";
-  if(!k){ latestKalshi=null; if(showStatus) showErr("Kalshi pull failed — enter target manually."); return null; }
+  if(!k){
+    latestKalshi=null;
+    if(showStatus) showErr("Kalshi pull failed — retrying... or enter target manually.");
+    // Auto retry once more after 3s
+    setTimeout(()=>refreshKalshiTarget(false), 3000);
+    return null;
+  }
   latestKalshi=k;
   if(!isNaN(k.target)&&k.target>0) $("target").value=k.target;
   if(k.yesMid!=null&&!isNaN(k.yesMid)){
@@ -1111,25 +1164,38 @@ function getTimeLeft(){
 // Tracks the rolling average price SINCE the current 15-min window opened
 const windowTWAP = {
   boundary: 0,
-  samples: [],        // [{price, ts}]
-  krakenPrice: null,  // second BRTI component
-  britiProxy: null,   // (CB*0.6 + Kraken*0.4)
+  samples: [],
+  krakenPrice: null,
+  britiProxy: null,
 
-  // Call every time a new Coinbase tick arrives
   push(price) {
     const now     = Date.now();
     const fifteen = 15 * 60 * 1000;
     const bnd     = Math.floor(now / fifteen) * fifteen;
-
-    // Reset on new window
     if(bnd !== this.boundary) {
       this.boundary = bnd;
       this.samples  = [];
     }
+    // Purge stale: only keep samples from current window start
+    this.samples = this.samples.filter(s => s.ts >= bnd);
     this.samples.push({ price, ts: now });
-    // Cap memory at 1 sample every 5s (max 180 per window)
-    if(this.samples.length > 200) this.samples.shift();
+    if(this.samples.length > 180) this.samples.shift();
     this._updateBRTI(price);
+  },
+
+  // Called from run() every cycle to force boundary check
+  // even when WS is quiet between auto-refresh cycles
+  checkBoundary() {
+    const now     = Date.now();
+    const fifteen = 15 * 60 * 1000;
+    const bnd     = Math.floor(now / fifteen) * fifteen;
+    if(bnd !== this.boundary) {
+      this.boundary = bnd;
+      this.samples  = [];
+    } else {
+      // Purge any samples older than window start (safety net)
+      this.samples = this.samples.filter(s => s.ts >= bnd);
+    }
   },
 
   _updateBRTI(cbPrice) {
@@ -1142,9 +1208,8 @@ const windowTWAP = {
 
   updateKraken(price) {
     this.krakenPrice = price;
-    if(this.samples.length > 0) {
+    if(this.samples.length > 0)
       this._updateBRTI(this.samples[this.samples.length-1].price);
-    }
   },
 
   avg() {
@@ -1152,69 +1217,54 @@ const windowTWAP = {
     return this.samples.reduce((s,p) => s + p.price, 0) / this.samples.length;
   },
 
-  // Weighted avg (recent = more weight, mimics TWAP settlement)
   weightedAvg() {
     if(!this.samples.length) return null;
     const n = this.samples.length;
     let pv = 0, w = 0;
-    this.samples.forEach((s, i) => {
-      const wt = (i + 1);           // linearly increasing weight
-      pv += s.price * wt;
-      w  += wt;
-    });
+    this.samples.forEach((s, i) => { const wt=i+1; pv+=s.price*wt; w+=wt; });
     return pv / w;
   },
 
-  // How much time has elapsed in this window (0-1)
   windowProgress() {
-    const now     = Date.now();
-    const fifteen = 15 * 60 * 1000;
+    const now = Date.now(), fifteen = 15*60*1000;
     return Math.min(1, (now - this.boundary) / fifteen);
   },
 
-  // Current estimated settlement (weighted avg with progress-based confidence)
-  settlementEstimate() {
-    const wa = this.weightedAvg();
-    if(!wa) return null;
-    // As window progresses, the weighted avg converges toward true settlement
-    return wa;
-  },
+  settlementEstimate() { return this.weightedAvg(); },
 
-  // Gap between window avg and target
   gapFromTarget(target) {
     const est = this.settlementEstimate();
     if(!est || !target) return null;
     return est - target;
   },
 
-  // Is the window "locked" into a direction? (gap > threshold, enough samples)
   lockedDirection(target, minGap = 15) {
-    if(this.samples.length < 5) return null;   // need at least 5 samples
+    if(this.samples.length < 5) return null;
     const gap = this.gapFromTarget(target);
     if(gap === null) return null;
-    const progress = this.windowProgress();
-    // Need bigger gap early in window, smaller is enough late
-    const threshold = minGap * (1.5 - progress);
+    const threshold = minGap * (1.5 - this.windowProgress());
     if(gap >  threshold) return "YES";
     if(gap < -threshold) return "NO";
     return null;
   },
 
   getGuardData(target) {
-    const est    = this.settlementEstimate();
-    const avg    = this.avg();
-    const wa     = this.weightedAvg();
-    const gap    = est && target ? est - target : null;
-    const prog   = this.windowProgress();
+    const est  = this.settlementEstimate();
+    const gap  = est && target ? est - target : null;
+    const prog = this.windowProgress();
     const locked = this.lockedDirection(target);
-    const sampleCount = this.samples.length;
-    const minsSinceStart = prog * 15;
     const britiEst = this.britiProxy;
     const britiGap = britiEst && target ? britiEst - target : null;
-
-    return { est, avg, wa, gap, prog, locked, sampleCount,
-             minsSinceStart, britiEst, britiGap,
-             krakenPrice: this.krakenPrice };
+    // Stale flag: TWAP and BRTI disagree by >$100 = stale overnight samples
+    const isStale = britiGap !== null && gap !== null && Math.abs(gap - britiGap) > 100;
+    return {
+      est, avg: this.avg(), wa: this.weightedAvg(),
+      gap, prog, locked,
+      sampleCount: this.samples.length,
+      minsSinceStart: prog * 15,
+      britiEst, britiGap, isStale,
+      krakenPrice: this.krakenPrice
+    };
   }
 };
 
@@ -1698,12 +1748,22 @@ function analyzeV5({product, price, target, marketInput, candles, restCandles, p
   }
   const tooClose=Math.abs(proj-target)<vol;
   const earlyWindow=timeLeft>6, idealWindow=timeLeft<=6&&timeLeft>=3, lateWindow=timeLeft<2;
+  // Hard blocks from data analysis
+  const now_h = new Date().getHours(), now_m = new Date().getMinutes();
+  const isNoonBlock = (now_h===11&&now_m>=45)||(now_h===12&&now_m<=15);
   let rawDecision="SKIP", timing=confidence>=70?"ENTER IF SIGNAL HOLDS":"WAIT";
-  if(confidence<60||volVeryHigh||tooClose||targetMagnet){ rawDecision="SKIP"; timing="AVOID / WAIT"; }
-  else if(diverg.earlyEntry&&confidence>=60&&timeLeft>6){ rawDecision=diverg.edge>0?"BET YES":"BET NO"; timing="EARLY ENTRY — DIVERGENCE"; }
+  if(isNoonBlock){ rawDecision="SKIP"; timing="12 PM BLOCK — 0% WIN RATE"; }
+  else if(confidence<60||volVeryHigh||tooClose||targetMagnet){ rawDecision="SKIP"; timing="AVOID / WAIT"; }
+  else if(diverg.earlyEntry&&confidence>=60&&timeLeft>6){
+    const divSide = diverg.edge>0?"BET YES":"BET NO";
+    // Don't fire if price already locked out by fee trap
+    const divMktPrice = divSide==="BET YES" ? mktYes*100 : mktNo*100;
+    if(divMktPrice > 80){ rawDecision="SKIP"; timing="FEE TRAP — SKIP"; }
+    else { rawDecision=divSide; timing="EARLY ENTRY — DIVERGENCE"; }
+  }
   else if(earlyWindow){ rawDecision="WATCH ONLY"; timing=earlyBias!=="NO EARLY BIAS"?"EARLY BIAS — WAIT FOR 6–3 MIN":"TOO EARLY — WAIT"; }
-  else if(idealWindow&&confidence>=65&&yes>=0.66&&yesScore>=7&&avgCushion>=cushionThresh*1.25&&price>target&&latestAvg>target&&proj>target&&ema9>ema21&&price>vwap&&latestGreen){ rawDecision="BET YES"; timing="IDEAL ENTRY WINDOW"; }
-  else if(idealWindow&&confidence>=65&&no>=0.66&&noScore>=7&&avgCushion<=-cushionThresh*1.25&&price<target&&latestAvg<target&&proj<target&&ema9<ema21&&price<vwap&&latestRed){ rawDecision="BET NO"; timing="IDEAL ENTRY WINDOW"; }
+  else if(idealWindow&&confidence>=65&&yes>=0.66&&yesScore>=7&&avgCushion>=cushionThresh*0.9&&price>target&&latestAvg>target&&proj>target&&ema9>ema21&&price>vwap){ rawDecision="BET YES"; timing="IDEAL ENTRY WINDOW"; }
+  else if(idealWindow&&confidence>=65&&no>=0.66&&noScore>=7&&avgCushion<=-cushionThresh*0.9&&price<target&&latestAvg<target&&proj<target&&ema9<ema21&&price<vwap){ rawDecision="BET NO"; timing="IDEAL ENTRY WINDOW"; }
   else if(lateWindow&&confidence>=70&&Math.abs(avgCushion)>=cushionThresh*2&&((yes>no&&yesScore>=7)||(no>yes&&noScore>=7))){ rawDecision=yes>no?"BET YES":"BET NO"; timing="LATE ENTRY — LOWER RETURN"; }
   else { rawDecision="SKIP"; timing="WAIT"; }
   const confirmed=applyConfirm(product,rawDecision,timing);
@@ -2639,16 +2699,12 @@ function calcGoldenRule(r, ec) {
   const mktY   = (r.mktYes || 0) * 100;
   const mktN   = 100 - mktY;
 
-  // ── FIX 1: Derive side from EXCHANGE direction, not from r.decision ──────
-  // BRTI proxy is the best settlement estimate. If BRTI > target by $15+,
-  // the exchange-confirmed direction is YES, regardless of what the decision engine said.
-  // Counter-trend NO (price above target, HTF ≤ -3) is the only exception.
-  const britiPrice   = (multiExch && multiExch.britiProxy(r.target)) || r.price || 0;
-  const britiGap     = britiPrice && r.target ? britiPrice - r.target : null;  // + = above target
-  const cbGap        = r.price && r.target ? r.price - r.target : 0;
-  const bnGap        = multiExch && multiExch.binance && r.target ? multiExch.binance - r.target : null;
+  // Exchange data for direction override
+  const britiPrice = (multiExch && multiExch.britiProxy(r.target)) || r.price || 0;
+  const britiGap   = britiPrice && r.target ? britiPrice - r.target : null;
+  const cbGap      = r.price && r.target ? r.price - r.target : 0;
+  const bnGap      = multiExch && multiExch.binance && r.target ? multiExch.binance - r.target : null;
 
-  // Exchange consensus: how many of the 3 exchanges are above target?
   let exchAbove = 0, exchBelow = 0;
   if(cbGap > 0) exchAbove++; else if(cbGap < 0) exchBelow++;
   if(britiGap !== null){ if(britiGap > 0) exchAbove++; else exchBelow++; }
@@ -2656,29 +2712,31 @@ function calcGoldenRule(r, ec) {
 
   const exchConsensusYes = exchAbove >= 2;
   const exchConsensusNo  = exchBelow >= 2;
-  const britiStrongYes   = britiGap !== null && britiGap > 40;   // $40+ = firmly YES
-  const britiStrongNo    = britiGap !== null && britiGap < -40;  // $40+ below = firmly NO
-  const bnStrongYes      = bnGap !== null && bnGap > 40;
-
-  // Counter-trend NO is valid only when: price is above target BUT HTF ≤ -3 (hourly pulling back)
+  const britiStrongYes   = britiGap !== null && britiGap > 40;
+  const britiStrongNo    = britiGap !== null && britiGap < -40;
   const validCounterTrendNo  = exchConsensusYes && htf <= -3;
   const validCounterTrendYes = exchConsensusNo  && htf >= 3;
 
-  // Derive exchange-confirmed side
+  // Exchange-confirmed side
   let exchSide;
-  if(britiStrongYes && !validCounterTrendNo)       exchSide = "YES";
-  else if(britiStrongNo && !validCounterTrendYes)  exchSide = "NO";
-  else if(exchConsensusYes && !validCounterTrendNo) exchSide = "YES";
+  if(britiStrongYes && !validCounterTrendNo)         exchSide = "YES";
+  else if(britiStrongNo && !validCounterTrendYes)    exchSide = "NO";
+  else if(exchConsensusYes && !validCounterTrendNo)  exchSide = "YES";
   else if(exchConsensusNo  && !validCounterTrendYes) exchSide = "NO";
-  else exchSide = mktY >= 50 ? "YES" : "NO";   // fall back to Kalshi market price
+  else exchSide = null;  // no strong exchange signal
 
-  // ── FIX 2: Detect exchange vs decision conflict ───────────────────────────
+  // Decision engine side — this is usually correct
+  // It reflects HTF, VWAP, trend, projected avg — all the slow signals
   const decSide = (r.decision === "BET YES") ? "YES" : "NO";
-  const exchConflict = (exchSide !== decSide) && (britiStrongYes || britiStrongNo);
-  // If there's a conflict, the exchange direction overrides the decision side
+
+  // Only override when exchange is STRONGLY contradicting (>$40 gap)
+  // Otherwise trust the decision engine which has the full signal picture
+  const exchConflict = exchSide !== null && exchSide !== decSide &&
+                       (britiStrongYes || britiStrongNo);
+
   const side = exchConflict ? exchSide : decSide;
 
-  const price  = side === "YES" ? mktY : mktN;  // cents for chosen side
+  const price = side === "YES" ? mktY : mktN;
 
   // ── 5 Golden Rules ────────────────────────────────────────────────────────
   // Rule 1: Kalshi price 55–75¢
@@ -2953,7 +3011,13 @@ ${(()=>{
 
   let twapWarnHTML = "";
   let twapCls = "neutral";
-  if(twd.est !== null && twd.sampleCount >= 5){
+
+  // If TWAP and BRTI disagree by >$100 = stale overnight samples
+  // Override: show stale warning and do NOT show LOCKED signal
+  if(twd.isStale && twd.sampleCount >= 5) {
+    twapCls = "warn";
+    twapWarnHTML = `<div class="twap-warning warn">⚠ TWAP data is stale (overnight samples) — BRTI proxy (+$${(twd.britiGap||0).toFixed(0)}) is more reliable. TWAP locked signal ignored.</div>`;
+  } else if(twd.est !== null && twd.sampleCount >= 5){
     const absGap   = Math.abs(twapGap);
     const timeLeft = r.timeLeft || 0;
     const vol      = r.vol || 0;
@@ -2987,6 +3051,7 @@ ${(()=>{
       twapWarnHTML=`<div class="twap-warning warn">Window avg ${twapGap>=0?"+":""}$${twapGap.toFixed(1)} from target — direction not locked yet</div>`;
     }
   }
+  
 
   return `
 <div class="exch5-strip">
@@ -3069,9 +3134,9 @@ ${(()=>{
   <div class="twap-title">📊 Window TWAP Guard <span class="small">${twd.sampleCount} samples · ${progPct}% of window elapsed</span></div>
   <div class="twap-bar-bg"><div class="twap-bar-fill" style="width:${barPct}%;background:${barColor};"></div></div>
   <div class="twap-row">
-    <span>Win Avg: <b class="${locked==="YES"?"yes":locked==="NO"?"no":twd.sampleCount<5?"skip":"warn"}">${twd.est?twd.est.toFixed(2):"collecting..."}</b></span>
-    <span>Gap vs Target: <b class="${twapGap!==null?(twapGap>0?"yes":twapGap<0?"no":"skip"):"skip"}">${twapGap!==null?(twapGap>=0?"+":"")+twapGap.toFixed(1):"—"}</b></span>
-    <span>BRTI: <b class="${britiColor}">${brti?brti.toFixed(2):"—"}</b></span>
+    <span>Win Avg: <b class="${twd.isStale?"warn":locked==="YES"?"yes":locked==="NO"?"no":twd.sampleCount<5?"skip":"warn"}">${twd.est?twd.est.toFixed(2):"collecting..."}${twd.isStale?" ⚠stale":""}</b></span>
+    <span>Gap: <b class="${twd.isStale?"warn":twapGap!==null?(twapGap>0?"yes":twapGap<0?"no":"skip"):"skip"}">${twd.isStale?"(ignored)":twapGap!==null?(twapGap>=0?"+":"")+twapGap.toFixed(1):"—"}</b></span>
+    <span>BRTI: <b class="${britiColor}">${brti?brti.toFixed(2):"—"} (${twd.isStale?"use this":"confirmed"})</b></span>
   </div>
   ${twapWarnHTML}
 </div>`;
@@ -3200,7 +3265,6 @@ ${bannerHTML}
     </div>
   </div>
 </div>`;
-})()}
 })()}
 
 <!-- ══ MICRO / SCALP / CUSHION INLINE ALERTS ═════════════════ -->
@@ -3631,7 +3695,7 @@ ${microAlertHTML}${scalpAlertHTML}${cushAlertHTML}
     <div class="row-item"><span class="row-label">Wick Warning</span><span class="small">${r.htf.wickWarning}</span></div>
   </div>
   <div class="small" style="margin-top:8px;color:#445;text-align:center;">
-    v6.6 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
+    v6.7 · Window TWAP Guard · BRTI proxy · multi-exchange strip · 7C confidence
   </div>
 </div>
 `;}
@@ -3649,6 +3713,9 @@ async function run(silent=false){
   if($("refreshStatus")) $("refreshStatus").innerHTML="⟳";
 
   await refreshKalshiTarget(silent);
+  // Force TWAP boundary check every run() — catches cases where WS
+  // was quiet and push() wasn't called at window boundary
+  windowTWAP.checkBoundary();
   const target=+$("target").value;
   const marketInput=+$("market").value;
 
