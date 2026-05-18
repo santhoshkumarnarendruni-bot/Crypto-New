@@ -3735,14 +3735,15 @@ async function run(silent=false){
     let price;
     if(liveState.coinbase && Date.now()-liveState.lastUpdate < 8000){
       price = liveState.coinbase;
-      // Sync multiExch and lastCbUpdate so age display stays current
       multiExch.set("coinbase", price);
       liveState.lastCbUpdate = Date.now();
+      windowTWAP.push(price);           // ← always feed TWAP from run() too
     } else {
       price = await getRestTicker(product);
       tickStore.push(price,"unknown",0);
       multiExch.set("coinbase", price);
       liveState.lastCbUpdate = Date.now();
+      windowTWAP.push(price);           // ← REST price also feeds TWAP
     }
 
     if(!liveState.fastPrice && secondTicker.ok){
